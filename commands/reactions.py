@@ -1,0 +1,98 @@
+"""Массовая постановка реакций со всех запущенных аккаунтов."""
+
+import asyncio
+import re
+
+from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.types import ReactionEmoji
+
+from commands import command
+from commands.utils import fmt, safe_edit, get_usage_instructions
+
+DEFAULT_EMOJI = "❤️"
+DELAY = 0.4  # между аккаунтами, чтобы не словить флуд-вейт сразу у всех
+
+LINK_RE = re.compile(r'(?:https?://)?t\.me/([A-Za-z0-9_]{5,32})/(\d+)(?:/(\d+))?')
+
+
+def _parse_link(text):
+    m = LINK_RE.search(text or "")
+    if not m:
+        return None, None
+    username = m.group(1)
+    msg_id = int(m.group(3) or m.group(2))
+    return username, msg_id
+
+
+@command(r'^\.like(?:\s+(\S+))?(?:\s+(\S+))?$', name="like", scope="local")
+async def like_handler(event, client, state):
+    """Ставит реакцию на сообщение со всех сейчас запущенных аккаунтов.
+
+    Варианты вызова:
+        .like                       — ответом на сообщение, эмодзи по умолчанию
+        .like 🔥                    — ответом на сообщение, свой эмодзи
+        .like https://t.me/c/123    — по ссылке (без ответа), эмодзи по умолчанию
+        .like https://t.me/c/123 🔥 — по ссылке со своим эмодзи
+    """
+    bot = state.bot
+    arg1 = event.pattern_match.group(1)
+    arg2 = event.pattern_match.group(2)
+
+    username, msg_id, emoji = None, None, DEFAULT_EMOJI
+    same_chat_executor = None  # клиент, которому не нужна ссылка — он уже в чате
+
+    if arg1 and "t.me/" in arg1:
+        username, msg_id = _parse_link(arg1)
+        if not msg_id:
+            await safe_edit(event, fmt("ошибка", ["не распознал ссылку на сообщение"]))
+            return
+        if arg2:
+            emoji = arg2
+    else:
+        if not event.is_reply:
+            await safe_edit(event, get_usage_instructions("like"))
+            return
+        reply = await event.get_reply_message()
+        if not reply:
+            await safe_edit(event, fmt("ошибка", ["не нашёл сообщение, на которое отвечаешь"]))
+            return
+        msg_id = reply.id
+        chat = await event.get_chat()
+        username = getattr(chat, "username", None)
+        same_chat_executor = client
+        if arg1:
+            emoji = arg1
+
+    if not bot.clients:
+        await safe_edit(event, fmt("ошибка", ["нет запущенных аккаунтов"]))
+        return
+
+    await safe_edit(event, fmt("ставлю реакции", [f"эмодзи — `{emoji}`"]))
+
+    rows = []
+    ok = 0
+    for num, acc_client in list(bot.clients.items()):
+        label = bot.router.label(num)
+        try:
+            if acc_client is same_chat_executor:
+                peer = event.chat_id
+            elif username:
+                peer = await acc_client.get_entity(username)
+            else:
+                rows.append(f"{label} — пропущен · приватный чат, нет ссылки")
+                continue
+
+            await acc_client(SendReactionRequest(
+                peer=peer,
+                msg_id=msg_id,
+                reaction=[ReactionEmoji(emoticon=emoji)],
+                add_to_recent=True,
+            ))
+            rows.append(f"{label} — ok")
+            ok += 1
+        except Exception as e:
+            rows.append(f"{label} — `{str(e)[:90]}`")
+        await asyncio.sleep(DELAY)
+
+    rows.insert(0, f"успешно — `{ok}/{len(bot.clients)}`")
+    await safe_edit(event, fmt(f"реакция · {emoji}", rows))
