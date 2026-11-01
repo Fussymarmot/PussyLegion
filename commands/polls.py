@@ -8,7 +8,7 @@ from telethon.tl.functions.messages import SendVoteRequest
 from telethon.tl.types import MessageMediaPoll
 
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions
+from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer
 
 DELAY = 0.5
 
@@ -78,14 +78,7 @@ async def vote_handler(event, client, state):
     for num, acc_client in list(bot.clients.items()):
         label = bot.router.label(num)
         try:
-            if acc_client is client:
-                peer = event.chat_id
-            elif username:
-                peer = await acc_client.get_entity(username)
-            else:
-                rows.append(f"{label} — пропущен · приватный чат, нет ссылки")
-                continue
-
+            peer = await resolve_peer(acc_client, event.chat_id, username)
             await acc_client(SendVoteRequest(peer=peer, msg_id=msg_id, options=options))
             rows.append(f"{label} — ok")
             ok += 1

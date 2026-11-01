@@ -63,7 +63,7 @@ async def save_self_destruct_photo(client, event):
             f"**✧** от — `{username}`\n"
             f"**✧** время — `{get_moscow_time()}`\n"
             f"**✧** id — `{event.id}`\n\n"
-            f"**PussyLegion** // @rubyland_fun"
+            f"**PussyLegion**"
         )
 
         await client.send_file(
@@ -120,7 +120,7 @@ async def save_deleted_message(client, event):
                 elif cached and cached.get("text"):
                     text_content = f"\n**✧** текст — `{cached['text']}`\n"
 
-                full_caption = caption + text_content + "\n**PussyLegion** // @rubyland_fun"
+                full_caption = caption + text_content + "\n**PussyLegion**"
 
                 if msg is not None and msg.media:
                     media = await client.download_media(msg.media)
@@ -190,7 +190,7 @@ async def manual_save(event, client, state):
             f"**✧** от — `{username}`\n"
             f"**✧** время — `{get_moscow_time()}`\n"
             f"**✧** id — `{reply.id}`\n\n"
-            f"**PussyLegion** // @rubyland_fun"
+            f"**PussyLegion**"
         )
 
         await client.send_file(
@@ -234,34 +234,44 @@ async def clone_handler(event, client, state):
 
 @command(r'^\.qr(?:\s+(.+))?$', name="qr", scope="local")
 async def qr_handler(event, client, state):
-    try:
-        await event.delete()
-    except Exception:
-        pass
-
     text = event.pattern_match.group(1)
     if not text:
-        return
-    if not qrcode:
+        await safe_edit(event, get_usage_instructions("qr"))
         return
 
+    if not qrcode:
+        await safe_edit(event, fmt("ошибка", [
+            "библиотека `qrcode` не установлена в этом окружении",
+            "поставь: `pip install qrcode[pil]` и перезапусти бота",
+        ]))
+        return
+
+    # удаляем команду только после того, как QR реально готов и отправлен —
+    # иначе при любой ошибке сообщение пропадает молча, без следа
     try:
         img = qrcode.make(text)
         path = TEMP_DIR / f"qr_{event.id}.png"
         img.save(str(path))
         await client.send_file(
-            "me",
+            event.chat_id,
             str(path),
             caption=(
                 f"**✦ qr готов**\n\n"
                 f"**✧** текст — `{text[:60]}`\n\n"
-                f"**PussyLegion** // @rubyland_fun"
+                f"**PussyLegion**"
             ),
             parse_mode="md",
         )
         path.unlink(missing_ok=True)
-    except Exception:
+    except Exception as e:
         exception("qr_handler")
+        await safe_edit(event, fmt("ошибка", [f"не удалось создать QR — `{str(e)[:120]}`"]))
+        return
+
+    try:
+        await event.delete()
+    except Exception:
+        pass
 
 
 @background

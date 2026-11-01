@@ -15,8 +15,42 @@ def fmt(title, rows=None):
         for row in rows:
             lines.append(f"**✧** {row}")
     lines.append("")
-    lines.append("**PussyLegion** // @rubyland_fun")
+    lines.append("**PussyLegion**")
     return "\n".join(lines)
+
+
+async def resolve_peer(client, chat_id=None, username=None):
+    """Отдаёт input-peer для произвольного клиента.
+
+    Нужно для команд, которые выполняет не тот аккаунт, что принял
+    исходное событие (рассылка .vote/.like/.spam и т.п. ассистентам, а
+    также .spam/.up в личке): у ассистента в его собственной сессии
+    может не быть кэша этого чата/пользователя, поэтому raw numeric id
+    ему не отдать напрямую — Telethon не резолвит id без access_hash.
+
+    1. сначала пробуем локальный кэш клиента по chat_id (если уже
+       состоит в чате, писал в него раньше, или это просто текущий
+       чат исполнителя — отработает мгновенно, без сети);
+    2. если есть юзернейм (паблик-чат или человек с открытым
+       @username) — резолвим по нему, это работает для ЛЮБОГО
+       аккаунта независимо от членства/переписки;
+    3. иначе — нет доступа, сообщаем явно вместо тихого падения или
+       неожиданного traceback.
+
+    chat_id можно не передавать (None), если резолвить нужно только
+    по ссылке/юзернейму — например, когда чат с сообщением не совпадает
+    с чатом, откуда пришла команда.
+    """
+    if chat_id is not None:
+        try:
+            return await client.get_input_entity(chat_id)
+        except ValueError:
+            pass
+
+    if username:
+        return await client.get_entity(username)
+
+    raise ValueError("нет доступа к чату — аккаунт не состоит в нём и нет публичной ссылки")
 
 
 def fmt_uptime(seconds):
@@ -107,6 +141,11 @@ COMMAND_INFO = {
         "description": "Голосует в опросе со всех запущенных аккаунтов. Без номера — покажет варианты.",
         "syntax": "`.vote` [номер] / `.vote` [1,3] — для multiple-choice",
         "example": "`.vote 2`",
+    },
+    "qr": {
+        "description": "Генерирует QR-код из текста/ссылки и присылает картинку в избранное.",
+        "syntax": "`.qr` [текст]",
+        "example": "`.qr https://example.com`",
     },
     "delme": {
         "description": "Удаляет всю переписку в текущем чате после подтверждения.",

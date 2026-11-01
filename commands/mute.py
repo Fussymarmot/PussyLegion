@@ -3,7 +3,7 @@ from telethon import events, Button
 from commands import background, command
 from database import db
 from logger import exception
-from commands.utils import fmt, safe_edit, get_moscow_time
+from commands.utils import fmt, safe_edit, get_moscow_time, resolve_peer
 
 
 async def _self_id(client, state):
@@ -171,17 +171,19 @@ async def tagall_handler(event, client, state):
 async def up_handler(event, client, state):
     if not event.is_reply:
         return
-    try:
-        count = min(int(event.pattern_match.group(1)), 50)
-        reply = await event.get_reply_message()
-        user = await reply.get_sender()
-        if not user.username:
-            return
-        for _ in range(count):
-            msg = await client.send_message(event.chat_id, f"@{user.username}")
-            await msg.delete()
-    except Exception:
-        exception("up_handler")
+    count = min(int(event.pattern_match.group(1)), 50)
+    reply = await event.get_reply_message()
+    user = await reply.get_sender()
+    if not user or not user.username:
+        await safe_edit(event, fmt("ошибка", ["у пользователя нет username — .up работает только по нему"]))
+        return
+
+    chat = await event.get_chat()
+    peer = await resolve_peer(client, event.chat_id, getattr(chat, "username", None))
+
+    for _ in range(count):
+        msg = await client.send_message(peer, f"@{user.username}")
+        await msg.delete()
 
 
 @command(r'^\.iter(?:\s+(-n))?$', name="iter", scope="local")

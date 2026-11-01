@@ -9,6 +9,7 @@ except ImportError:
     pass
 
 VERSION = "v1.4.0"
+CHANNEL = os.getenv("CHANNEL", "@hurodev")
 
 
 _env_api_id = (os.getenv("API_ID") or "").strip()

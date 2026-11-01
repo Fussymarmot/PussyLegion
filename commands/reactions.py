@@ -7,7 +7,7 @@ from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions
+from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer
 
 DEFAULT_EMOJI = "❤️"
 DELAY = 0.4  # между аккаунтами, чтобы не словить флуд-вейт сразу у всех
@@ -39,7 +39,7 @@ async def like_handler(event, client, state):
     arg2 = event.pattern_match.group(2)
 
     username, msg_id, emoji = None, None, DEFAULT_EMOJI
-    same_chat_executor = None  # клиент, которому не нужна ссылка — он уже в чате
+    same_chat = True  # сообщение в том же чате, где написана команда, или в другом (по ссылке)
 
     if arg1 and "t.me/" in arg1:
         username, msg_id = _parse_link(arg1)
@@ -48,6 +48,7 @@ async def like_handler(event, client, state):
             return
         if arg2:
             emoji = arg2
+        same_chat = False  # ссылка ведёт в чат, который может отличаться от текущего
     else:
         if not event.is_reply:
             await safe_edit(event, get_usage_instructions("like"))
@@ -59,7 +60,6 @@ async def like_handler(event, client, state):
         msg_id = reply.id
         chat = await event.get_chat()
         username = getattr(chat, "username", None)
-        same_chat_executor = client
         if arg1:
             emoji = arg1
 
@@ -74,14 +74,7 @@ async def like_handler(event, client, state):
     for num, acc_client in list(bot.clients.items()):
         label = bot.router.label(num)
         try:
-            if acc_client is same_chat_executor:
-                peer = event.chat_id
-            elif username:
-                peer = await acc_client.get_entity(username)
-            else:
-                rows.append(f"{label} — пропущен · приватный чат, нет ссылки")
-                continue
-
+            peer = await resolve_peer(acc_client, event.chat_id if same_chat else None, username)
             await acc_client(SendReactionRequest(
                 peer=peer,
                 msg_id=msg_id,

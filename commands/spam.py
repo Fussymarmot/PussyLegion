@@ -6,7 +6,7 @@ import aiohttp
 from telethon.errors import FloodWaitError
 from telethon.tl import types
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions
+from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer
 from logger import exception
 
 try:
@@ -21,21 +21,28 @@ async def spam_handler(event, client, state):
     if not args or not args[0] or not args[1]:
         await safe_edit(event, get_usage_instructions("spam"))
         return
+
+    count = int(args[0])
+    message = args[1]
+    if count > 250:
+        await safe_edit(event, fmt("ошибка", ["максимум 250"]))
+        return
+
+    # резолвим чат ДО удаления команды и ДО рассылки: если у этого
+    # аккаунта нет доступа к чату (например, он не состоит в нём),
+    # падаем здесь — диспетчер сам покажет ошибку или передаст
+    # команду следующему аккаунту в пуле
+    chat = await event.get_chat()
+    peer = await resolve_peer(client, event.chat_id, getattr(chat, "username", None))
+
     try:
-        count = int(args[0])
-        message = args[1]
-        if count > 250:
-            await safe_edit(event, fmt("ошибка", ["максимум 250"]))
-            return
-        try:
-            await event.delete()
-        except Exception:
-            pass
-        for _ in range(count):
-            await client.send_message(event.chat_id, message)
-            await asyncio.sleep(0.5)
-    except Exception as e:
-        exception(f"spam: {e}")
+        await event.delete()
+    except Exception:
+        pass
+
+    for _ in range(count):
+        await client.send_message(peer, message)
+        await asyncio.sleep(0.5)
 
 
 @command(r'^\.sti(?:\s+(\d+))?$', name="sti", scope="remote")
