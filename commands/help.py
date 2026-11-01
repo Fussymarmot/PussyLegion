@@ -62,7 +62,7 @@ HELP_TEXT = """**✦ помощь**
   `.random 1-100` — случайное число
   `.dice` — кубик
 
-**PussyLegion** // @hurodev
+**PussyLegion** // @rubyland_fun
 """
 
 
@@ -82,6 +82,6 @@ async def help_handler(event, client, state):
         f"**✧** описание — {info['description']}\n"
         f"**✧** синтаксис — {info['syntax']}\n"
         f"**✧** пример — {info['example']}\n\n"
-        f"**PussyLegion** // @hurodev"
+        f"**PussyLegion** // @rubyland_fun"
     )
     await safe_edit(event, text)

@@ -15,7 +15,7 @@ def fmt(title, rows=None):
         for row in rows:
             lines.append(f"**✧** {row}")
     lines.append("")
-    lines.append("**PussyLegion** // @hurodev")
+    lines.append("**PussyLegion** // @rubyland_fun")
     return "\n".join(lines)
 
 

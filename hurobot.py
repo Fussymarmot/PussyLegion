@@ -77,7 +77,7 @@ def banner():
     print(f"{COLORS['accent2']}┃{COLORS['reset']}{' ' * pad}{COLORS['accent1']}{title}{COLORS['reset']}"
           f"{' ' * (width - len(title) - pad)}{COLORS['accent2']}┃{COLORS['reset']}")
     print(f"{COLORS['accent2']}┗{'━' * width}┛{COLORS['reset']}")
-    print(f"{COLORS['header']}                    {VERSION} {COLORS['accent2']}//{COLORS['accent3']} @hurodev{COLORS['reset']}")
+    print(f"{COLORS['header']}                    {VERSION} {COLORS['accent2']}//{COLORS['accent3']} @rubyland_fun{COLORS['reset']}")
 
 
 class HuroBot:

@@ -63,7 +63,7 @@ async def save_self_destruct_photo(client, event):
             f"**✧** от — `{username}`\n"
             f"**✧** время — `{get_moscow_time()}`\n"
             f"**✧** id — `{event.id}`\n\n"
-            f"**PussyLegion** // @hurodev"
+            f"**PussyLegion** // @rubyland_fun"
         )
 
         await client.send_file(
@@ -120,7 +120,7 @@ async def save_deleted_message(client, event):
                 elif cached and cached.get("text"):
                     text_content = f"\n**✧** текст — `{cached['text']}`\n"
 
-                full_caption = caption + text_content + "\n**PussyLegion** // @hurodev"
+                full_caption = caption + text_content + "\n**PussyLegion** // @rubyland_fun"
 
                 if msg is not None and msg.media:
                     media = await client.download_media(msg.media)
@@ -190,7 +190,7 @@ async def manual_save(event, client, state):
             f"**✧** от — `{username}`\n"
             f"**✧** время — `{get_moscow_time()}`\n"
             f"**✧** id — `{reply.id}`\n\n"
-            f"**PussyLegion** // @hurodev"
+            f"**PussyLegion** // @rubyland_fun"
         )
 
         await client.send_file(
@@ -255,7 +255,7 @@ async def qr_handler(event, client, state):
             caption=(
                 f"**✦ qr готов**\n\n"
                 f"**✧** текст — `{text[:60]}`\n\n"
-                f"**PussyLegion** // @hurodev"
+                f"**PussyLegion** // @rubyland_fun"
             ),
             parse_mode="md",
         )
