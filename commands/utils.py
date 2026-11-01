@@ -307,7 +307,7 @@ def register_animation(client, state):
                 current += char
                 try:
                     await event.edit(current)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.15)
                 except MessageNotModifiedError:
                     continue
                 except Exception:
