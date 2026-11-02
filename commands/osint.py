@@ -616,11 +616,16 @@ async def mosint_handler(event, client, state):
             return
 
         if not out_path.is_file():
-            tail = (result.stdout or result.stderr or "").strip()[-800:]
-            rows = [f"`{mail}`", "не нашёл json-отчёт"]
+            # stderr — приоритетный источник причины падения; раньше тут
+            # было `stdout or stderr`, из-за чего баннер в stdout забивал
+            # собой реальную ошибку, если она вся ушла в stderr
+            err = (result.stderr or "").strip()
+            out = (result.stdout or "").strip()
+            tail = (err or out)[-800:]
+            rows = [f"`{mail}`", f"не нашёл json-отчёт (код возврата `{result.returncode}`)"]
             if "mosint.yaml" in tail or "config" in tail.lower():
                 rows.append("похоже, нет конфига — создай хотя бы пустой `~/.mosint.yaml`")
-            rows.append(f"сырой вывод:\n```\n{tail}\n```")
+            rows.append(f"{'stderr' if err else 'stdout'}:\n```\n{tail}\n```")
             await safe_edit(event, fmt("mosint", rows))
             return
 
@@ -701,8 +706,14 @@ async def h8mail_handler(event, client, state):
             return
 
         if not out_path.is_file():
-            tail = (result.stdout or result.stderr or "").strip()[-800:]
-            await safe_edit(event, fmt("h8mail", [f"`{mail}`", "не нашёл json-отчёт, сырой вывод:", f"```\n{tail}\n```"]))
+            err = (result.stderr or "").strip()
+            out = (result.stdout or "").strip()
+            tail = (err or out)[-800:]
+            await safe_edit(event, fmt("h8mail", [
+                f"`{mail}`",
+                f"не нашёл json-отчёт (код возврата `{result.returncode}`)",
+                f"{'stderr' if err else 'stdout'}:\n```\n{tail}\n```",
+            ]))
             return
 
         try:
