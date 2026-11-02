@@ -289,12 +289,39 @@ async def _mail_lookup(event, mail):
             [holehe_path, mail],
             capture_output=True, text=True, shell=False, check=True, timeout=120,
         )
-        lines = result.stdout.split("\n")[4:-4]
-        output = "\n".join(
-            line.replace("[x]", "✖").replace("[-]", "—").replace("[+]", "✔")
-            for line in lines
-        )
-        await safe_edit(event, fmt("почта", [f"`{mail}`", output[:900]]))
+
+        # holehe размечает каждую проверку одним из трёх статусов:
+        #   [+] — аккаунт найден
+        #   [-] — аккаунт точно не найден
+        #   [x] — проверка не удалась (рейтлимит/блок сайта/таймаут) —
+        #         это НЕ "не зарегистрирован", а "не смогли узнать".
+        # Раньше [x] рисовался крестиком ✖, который визуально читался как
+        # "точно нет", из-за чего реальные аккаунты на заблокированных
+        # сайтах выглядели как "не найдено". Плюс сырой вывод резался по
+        # 900 символам ДО сортировки — находки (`[+]`), если шли по
+        # алфавиту позже, вообще не попадали в сообщение.
+        found, not_found, errored = [], [], []
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if line.startswith("[+]"):
+                found.append(line[3:].strip())
+            elif line.startswith("[-]"):
+                not_found.append(line[3:].strip())
+            elif line.startswith("[x]"):
+                errored.append(line[3:].strip())
+
+        rows = [f"`{mail}`"]
+        if found:
+            shown = ", ".join(found[:50])
+            if len(found) > 50:
+                shown += f" … (+{len(found) - 50})"
+            rows.append(f"✔ найдено ({len(found)}) — {shown}")
+        else:
+            rows.append("✔ найдено — ничего")
+        rows.append(f"— точно не найдено — `{len(not_found)}`")
+        rows.append(f"⚠ не удалось проверить (блок/рейтлимит сайта, не значит «нет») — `{len(errored)}`")
+
+        await safe_edit(event, fmt("почта", rows))
     except FileNotFoundError:
         await safe_edit(event, fmt("ошибка", [
             "`holehe` не найден",
