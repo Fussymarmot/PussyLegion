@@ -2,6 +2,8 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+
 import requests
 import whois as whois_lib
 from telethon.tl.functions.users import GetFullUserRequest
@@ -245,14 +247,19 @@ async def _phone_lookup(event, phone):
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
 
-def _holehe_cmd(mail):
-    """Ищет исполняемый holehe: сначала в PATH, затем как модуль того же
-    интерпретатора (pip install мог поставить его в окружение, где bin-папка
-    не попала в PATH — частая причина 'No such file or directory')."""
+def _find_holehe():
+    """Ищет исполняемый holehe: сначала в PATH, затем рядом с текущим
+    интерпретатором (venv/bin) — именно там pip кладёт консольный скрипт,
+    даже если сама bin-папка venv не попала в системный PATH."""
     path = shutil.which("holehe")
     if path:
-        return [path, mail]
-    return [sys.executable, "-m", "holehe", mail]
+        return path
+    candidate = Path(sys.executable).with_name(
+        "holehe.exe" if sys.platform == "win32" else "holehe"
+    )
+    if candidate.is_file():
+        return str(candidate)
+    return None
 
 
 async def _mail_lookup(event, mail):
@@ -261,18 +268,25 @@ async def _mail_lookup(event, mail):
             await safe_edit(event, fmt("ошибка", ["неверный формат почты"]))
             return
 
-        if shutil.which("holehe") is None:
+        holehe_path = _find_holehe()
+        if holehe_path is None:
             try:
-                import holehe  # noqa: F401 — проверяем, что пакет хотя бы импортируется
+                import holehe  # noqa: F401 — пакет есть, просто нет консольного скрипта в venv
             except ImportError:
                 await safe_edit(event, fmt("ошибка", [
                     "`holehe` не установлен",
                     "выполни: `pip install holehe` (или `pip install -r requirements.txt`) и перезапусти бота",
                 ]))
                 return
+            await safe_edit(event, fmt("ошибка", [
+                "пакет `holehe` установлен, но консольный скрипт не найден",
+                "проверь, что venv ставился с `pip install holehe` (а не только `pip install -e .` без entry_points), "
+                "или добавь папку `.venv/bin` в `PATH`",
+            ]))
+            return
 
         result = subprocess.run(
-            _holehe_cmd(mail),
+            [holehe_path, mail],
             capture_output=True, text=True, shell=False, check=True, timeout=120,
         )
         lines = result.stdout.split("\n")[4:-4]
