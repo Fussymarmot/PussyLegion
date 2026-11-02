@@ -9,7 +9,7 @@ from telethon.tl.types import ReactionEmoji
 from commands import command
 from commands.utils import (
     fmt, safe_edit, get_usage_instructions, resolve_peer, username_of,
-    parse_message_link, touch_message,
+    parse_message_link, send_with_recovery,
 )
 
 DEFAULT_EMOJI = "❤️"
@@ -23,23 +23,6 @@ def _reaction_request(peer, msg_id, emoji):
         reaction=[ReactionEmoji(emoticon=emoji)],
         add_to_recent=True,
     )
-
-
-async def _send_reaction(acc_client, peer, msg_id, emoji):
-    """Ставит реакцию; на MESSAGE_ID_INVALID делает один повтор.
-
-    Свежее сообщение иногда ещё не разошлось по сессиям аккаунтов —
-    первый запрос Telegram может отклонить. Подтягиваем сообщение
-    через get_messages и повторяем, вместо того чтобы заранее
-    отказываться от аккаунта.
-    """
-    try:
-        await acc_client(_reaction_request(peer, msg_id, emoji))
-        return
-    except MessageIdInvalidError:
-        await touch_message(acc_client, peer, msg_id)
-        await asyncio.sleep(0.5)
-        await acc_client(_reaction_request(peer, msg_id, emoji))
 
 
 @command(r'^\.like(?:\s+(\S+))?(?:\s+(\S+))?$', name="like", scope="local")
@@ -90,17 +73,25 @@ async def like_handler(event, client, state):
 
     rows = []
     ok = 0
+    chat_target = event.chat_id if same_chat else peer_id
     for num, acc_client in list(bot.clients.items()):
         label = bot.router.label(num)
         try:
-            peer = await resolve_peer(
+            peer = await resolve_peer(acc_client, chat_target, username)
+            joined = await send_with_recovery(
                 acc_client,
-                event.chat_id if same_chat else peer_id,
-                username,
+                lambda target: _reaction_request(target, msg_id, emoji),
+                peer,
+                msg_id,
+                username=username,
+                inviter=client,
+                invite_entity=chat_target,
+                resolve=lambda c: resolve_peer(c, chat_target, username),
             )
-            await _send_reaction(acc_client, peer, msg_id, emoji)
-            rows.append(f"{label} — ok")
+            rows.append(f"{label} — ok" + (" · зашёл в чат" if joined else ""))
             ok += 1
+        except MessageIdInvalidError:
+            rows.append(f"{label} — сообщение недоступно: не в чате или скрыта история")
         except Exception as e:
             rows.append(f"{label} — `{str(e)[:90]}`")
         await asyncio.sleep(DELAY)

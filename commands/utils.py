@@ -4,7 +4,14 @@ import time
 from datetime import datetime
 import pytz
 from telethon import events
-from telethon.errors import MessageNotModifiedError
+from telethon.errors import (
+    MessageNotModifiedError,
+    MessageIdInvalidError,
+    UserAlreadyParticipantError,
+    FloodWaitError,
+)
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ExportChatInviteRequest, ImportChatInviteRequest
 from commands import background, command
 from logger import exception
 
@@ -13,6 +20,7 @@ LINK_HOST_RE = re.compile(
     re.IGNORECASE,
 )
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,32}$')
+INVITE_RE = re.compile(r'(?:t\.me/(?:\+|joinchat/))([\w-]+)', re.IGNORECASE)
 
 
 def fmt(title, rows=None):
@@ -142,6 +150,91 @@ async def touch_message(client, peer, msg_id):
         return await client.get_messages(peer, ids=msg_id)
     except Exception:
         return None
+
+
+async def try_join(client, username=None, inviter=None, invite_entity=None):
+    """Best-effort заводит аккаунт в чат, где лежит сообщение.
+
+    Публичный чат — по юзернейму. Приватный — по инвайт-ссылке, которую
+    берём у исполнителя команды (он в чате и обычно может создать ссылку).
+    Возвращает True только если вход действительно произошёл.
+    """
+    if username:
+        try:
+            await client(JoinChannelRequest(username))
+            return True
+        except UserAlreadyParticipantError:
+            return False
+        except FloodWaitError:
+            raise
+        except Exception as e:
+            exception(f"try_join.username: {e}")
+
+    if inviter is not None and invite_entity is not None:
+        try:
+            invite = await inviter(ExportChatInviteRequest(invite_entity))
+        except FloodWaitError:
+            raise
+        except Exception as e:
+            exception(f"try_join.export: {e}")
+            invite = None
+
+        match = INVITE_RE.search(getattr(invite, "link", "") or "")
+        if not match:
+            return False
+
+        try:
+            await client(ImportChatInviteRequest(match.group(1)))
+            return True
+        except UserAlreadyParticipantError:
+            return False
+        except FloodWaitError:
+            raise
+        except Exception as e:
+            exception(f"try_join.import: {e}")
+
+    return False
+
+
+async def send_with_recovery(acc_client, make_request, peer, msg_id, *,
+                             username=None, inviter=None, invite_entity=None,
+                             resolve=None):
+    """Выполняет запрос с восстановлением после MESSAGE_ID_INVALID.
+
+    1. повторяем после явного get_messages — сообщение иногда просто ещё
+       не разошлось по сессиям;
+    2. если всё равно не выходит — пробуем завести аккаунт в чат и
+       повторяем ещё раз (после `resolve`, чтобы взять свежий access_hash).
+
+    Возвращает True, если пришлось заходить в чат.
+    """
+    last = None
+
+    # две попытки с подтягиванием сообщения: свежий пост иногда доходит
+    # до сессии аккаунта с задержкой
+    for delay in (0.4, 1.0):
+        try:
+            await acc_client(make_request(peer))
+            return False
+        except MessageIdInvalidError as e:
+            last = e
+        await touch_message(acc_client, peer, msg_id)
+        await asyncio.sleep(delay)
+
+    joined = await try_join(
+        acc_client,
+        username=username,
+        inviter=inviter,
+        invite_entity=invite_entity,
+    )
+    if not joined:
+        raise last
+
+    if resolve is not None:
+        peer = await resolve(acc_client)
+    await asyncio.sleep(0.5)
+    await acc_client(make_request(peer))
+    return True
 
 
 def username_of(entity):

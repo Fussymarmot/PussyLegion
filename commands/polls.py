@@ -10,7 +10,7 @@ from telethon.tl.types import MessageMediaPoll
 from commands import command
 from commands.utils import (
     fmt, safe_edit, get_usage_instructions, resolve_peer, username_of,
-    parse_message_link, touch_message,
+    parse_message_link, send_with_recovery,
 )
 
 DELAY = 0.5
@@ -23,22 +23,6 @@ def _text(obj):
 
 def _vote_request(peer, msg_id, options):
     return SendVoteRequest(peer=peer, msg_id=msg_id, options=options)
-
-
-async def _send_vote(acc_client, peer, msg_id, options):
-    """Голосует; на MESSAGE_ID_INVALID делает один повтор.
-
-    У только что отправленного опроса сессия аккаунта иногда ещё не
-    знает сообщение. Подтягиваем его через get_messages и повторяем,
-    вместо того чтобы заранее списывать аккаунт со счетов.
-    """
-    try:
-        await acc_client(_vote_request(peer, msg_id, options))
-        return
-    except MessageIdInvalidError:
-        await touch_message(acc_client, peer, msg_id)
-        await asyncio.sleep(0.5)
-        await acc_client(_vote_request(peer, msg_id, options))
 
 
 @command(r'^\.vote(?:\s+(\S+))?(?:\s+(\S+))?$', name="vote", scope="local")
@@ -122,19 +106,27 @@ async def vote_handler(event, client, state):
 
     rows = []
     ok = 0
+    chat_target = event.chat_id if same_chat else peer_id
     for num, acc_client in list(bot.clients.items()):
         label = bot.router.label(num)
         try:
-            peer = await resolve_peer(
+            peer = await resolve_peer(acc_client, chat_target, username)
+            joined = await send_with_recovery(
                 acc_client,
-                event.chat_id if same_chat else peer_id,
-                username,
+                lambda target: _vote_request(target, msg_id, options),
+                peer,
+                msg_id,
+                username=username,
+                inviter=client,
+                invite_entity=chat_target,
+                resolve=lambda c: resolve_peer(c, chat_target, username),
             )
-            await _send_vote(acc_client, peer, msg_id, options)
-            rows.append(f"{label} — ok")
+            rows.append(f"{label} — ok" + (" · зашёл в чат" if joined else ""))
             ok += 1
         except FloodWaitError as e:
             rows.append(f"{label} — flood wait {e.seconds}с")
+        except MessageIdInvalidError:
+            rows.append(f"{label} — сообщение недоступно: не в чате или скрыта история")
         except Exception as e:
             rows.append(f"{label} — `{str(e)[:90]}`")
         await asyncio.sleep(DELAY)
