@@ -300,15 +300,23 @@ async def _mail_lookup(event, mail):
         # сайтах выглядели как "не найдено". Плюс сырой вывод резался по
         # 900 символам ДО сортировки — находки (`[+]`), если шли по
         # алфавиту позже, вообще не попадали в сообщение.
+        # строки результата — ровно "[метка] домен", один токен без пробелов
+        # и запятых. Так отсеивается легенда, которую holehe печатает перед
+        # результатами ("[+] Email used, [-] Email not used, [x] Rate
+        # limit") — она тоже начинается с "[+]", но доменом не является.
+        result_line = re.compile(r'^\[([+\-x])\]\s+(\S+)$')
         found, not_found, errored = [], [], []
         for line in result.stdout.split("\n"):
-            line = line.strip()
-            if line.startswith("[+]"):
-                found.append(line[3:].strip())
-            elif line.startswith("[-]"):
-                not_found.append(line[3:].strip())
-            elif line.startswith("[x]"):
-                errored.append(line[3:].strip())
+            m = result_line.match(line.strip())
+            if not m:
+                continue
+            mark, site = m.group(1), m.group(2)
+            if mark == "+":
+                found.append(site)
+            elif mark == "-":
+                not_found.append(site)
+            else:
+                errored.append(site)
 
         rows = [f"`{mail}`"]
         if found:
@@ -319,7 +327,13 @@ async def _mail_lookup(event, mail):
         else:
             rows.append("✔ найдено — ничего")
         rows.append(f"— точно не найдено — `{len(not_found)}`")
-        rows.append(f"⚠ не удалось проверить (блок/рейтлимит сайта, не значит «нет») — `{len(errored)}`")
+        if errored:
+            shown = ", ".join(errored[:50])
+            if len(errored) > 50:
+                shown += f" … (+{len(errored) - 50})"
+            rows.append(f"⚠ не удалось проверить ({len(errored)}, не значит «нет») — {shown}")
+        else:
+            rows.append("⚠ не удалось проверить — ничего")
 
         await safe_edit(event, fmt("почта", rows))
     except FileNotFoundError:
