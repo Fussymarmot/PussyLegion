@@ -1,5 +1,7 @@
 import re
+import shutil
 import subprocess
+import sys
 import requests
 import whois as whois_lib
 from telethon.tl.functions.users import GetFullUserRequest
@@ -33,6 +35,47 @@ async def _resolve_full_user(client, reply):
     return user, full_user
 
 
+def _fmt_status(status):
+    """Превращает TL UserStatus* в человекочитаемую строку."""
+    if status is None:
+        return "скрыт"
+    cls = status.__class__.__name__
+    if cls == "UserStatusOnline":
+        return "в сети"
+    if cls == "UserStatusOffline":
+        was_online = getattr(status, "was_online", None)
+        if was_online:
+            return f"был(а) в сети `{was_online.strftime('%Y-%m-%d %H:%M:%S')}`"
+        return "не в сети"
+    if cls == "UserStatusRecently":
+        return "был(а) недавно"
+    if cls == "UserStatusLastWeek":
+        return "был(а) на этой неделе"
+    if cls == "UserStatusLastMonth":
+        return "был(а) в этом месяце"
+    return "скрыт"
+
+
+def _full_attr(full_user, name, default=None):
+    """GetFullUserRequest в разных версиях Telethon возвращает поля
+    (about/common_chats_count/blocked) то прямо на результате, то во
+    вложенном .full_user — проверяем оба варианта."""
+    value = getattr(full_user, name, None)
+    if value is not None:
+        return value
+    nested = getattr(full_user, "full_user", None)
+    if nested is not None:
+        return getattr(nested, name, default)
+    return default
+
+
+def _username_list(user):
+    primary = getattr(user, "username", None)
+    extra = [u.username for u in (getattr(user, "usernames", None) or []) if u.username and u.username != primary]
+    names = [n for n in ([primary] if primary else []) + extra if n]
+    return ", ".join(f"@{n}" for n in names) if names else None
+
+
 @command(r'^\.data$', name="data")
 async def data_handler(event, client, state):
     if not event.is_reply:
@@ -42,18 +85,56 @@ async def data_handler(event, client, state):
         reply = await event.get_reply_message()
         user, full_user = await _resolve_full_user(client, reply)
 
-        rows = [f"id — `{user.id}`", f"имя — `{user.first_name or 'нет'}`"]
+        rows = [f"id — `{user.id}`"]
+
+        usernames = _username_list(user)
+        if usernames:
+            rows.append(f"юзернейм — {usernames}")
+
+        rows.append(f"имя — `{user.first_name or 'нет'}`")
+        if getattr(user, "last_name", None):
+            rows.append(f"фамилия — `{user.last_name}`")
+
         if getattr(user, "phone", None):
-            rows.append(f"телефон — `{user.phone}`")
-        status = getattr(user, "status", None)
-        if status:
-            if hasattr(status, "was_online"):
-                rows.append(f"был онлайн — `{status.was_online.strftime('%Y-%m-%d %H:%M:%S')}`")
-            if hasattr(status, "created"):
-                rows.append(f"регистрация — `{status.created.strftime('%Y-%m-%d %H:%M:%S')}`")
-        about = getattr(full_user, "about", None)
+            rows.append(f"телефон — `+{user.phone}`")
+        else:
+            rows.append("телефон — `скрыт/недоступен`")
+
+        rows.append(f"статус — {_fmt_status(getattr(user, 'status', None))}")
+
+        lang = getattr(user, "lang_code", None)
+        if lang:
+            rows.append(f"язык — `{lang}`")
+
+        flags = []
+        if getattr(user, "premium", False):
+            flags.append("premium")
+        if getattr(user, "verified", False):
+            flags.append("verified")
+        if getattr(user, "bot", False):
+            flags.append("бот")
+        if getattr(user, "scam", False):
+            flags.append("scam")
+        if getattr(user, "fake", False):
+            flags.append("fake")
+        if getattr(user, "restricted", False):
+            flags.append("restricted")
+        if getattr(user, "deleted", False):
+            flags.append("удалён")
+        if flags:
+            rows.append(f"метки — `{', '.join(flags)}`")
+
+        about = _full_attr(full_user, "about")
         if about:
-            rows.append(f"о себе — `{about[:100]}`")
+            rows.append(f"о себе — `{about[:150]}`")
+
+        common = _full_attr(full_user, "common_chats_count")
+        if common:
+            rows.append(f"общих чатов — `{common}`")
+
+        if _full_attr(full_user, "blocked", False):
+            rows.append("в чёрном списке — `да`")
+
         await safe_edit(event, fmt("данные пользователя", rows))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
@@ -164,13 +245,34 @@ async def _phone_lookup(event, phone):
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
 
+def _holehe_cmd(mail):
+    """Ищет исполняемый holehe: сначала в PATH, затем как модуль того же
+    интерпретатора (pip install мог поставить его в окружение, где bin-папка
+    не попала в PATH — частая причина 'No such file or directory')."""
+    path = shutil.which("holehe")
+    if path:
+        return [path, mail]
+    return [sys.executable, "-m", "holehe", mail]
+
+
 async def _mail_lookup(event, mail):
     try:
         if not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", mail):
             await safe_edit(event, fmt("ошибка", ["неверный формат почты"]))
             return
+
+        if shutil.which("holehe") is None:
+            try:
+                import holehe  # noqa: F401 — проверяем, что пакет хотя бы импортируется
+            except ImportError:
+                await safe_edit(event, fmt("ошибка", [
+                    "`holehe` не установлен",
+                    "выполни: `pip install holehe` (или `pip install -r requirements.txt`) и перезапусти бота",
+                ]))
+                return
+
         result = subprocess.run(
-            ["holehe", mail],
+            _holehe_cmd(mail),
             capture_output=True, text=True, shell=False, check=True, timeout=120,
         )
         lines = result.stdout.split("\n")[4:-4]
@@ -179,5 +281,13 @@ async def _mail_lookup(event, mail):
             for line in lines
         )
         await safe_edit(event, fmt("почта", [f"`{mail}`", output[:900]]))
+    except FileNotFoundError:
+        await safe_edit(event, fmt("ошибка", [
+            "`holehe` не найден",
+            "выполни: `pip install holehe` (или `pip install -r requirements.txt`) и перезапусти бота",
+        ]))
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        await safe_edit(event, fmt("ошибка", [f"holehe упал — `{stderr[:200] or e}`"]))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))

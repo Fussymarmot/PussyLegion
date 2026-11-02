@@ -9,3 +9,4 @@ qrcode[pil]
 colorama
 python-socks[asyncio]
 fake-useragent
+holehe
