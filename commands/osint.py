@@ -1,7 +1,11 @@
+import hashlib
+import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import requests
@@ -9,6 +13,11 @@ import whois as whois_lib
 from telethon.tl.functions.users import GetFullUserRequest
 from commands import command
 from commands.utils import safe_edit, fmt, get_usage_instructions
+from config import CACHE_DIR
+
+# кэш последнего прогона holehe по каждой почте — нужен для .osint <почта> -r
+OSINT_MAIL_CACHE_DIR = CACHE_DIR / "osint_mail"
+OSINT_MAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 async def _resolve_full_user(client, reply):
@@ -149,11 +158,26 @@ async def osint_handler(event, client, state):
         await safe_edit(event, get_usage_instructions("osint"))
         return
     target = args[1].strip()
+
+    # -r (в любом месте строки) — ретрай: для почты значит "прогнать holehe
+    # ещё раз и подтянуть статус по доменам, упавшим с [x] в прошлый раз".
+    # На IP/телефон не влияет — там и так один сетевой запрос, ретраить нечего.
+    retry = False
+    parts = target.split()
+    if "-r" in parts:
+        retry = True
+        parts = [p for p in parts if p != "-r"]
+        target = " ".join(parts).strip()
+
+    if not target:
+        await safe_edit(event, get_usage_instructions("osint"))
+        return
+
     try:
         if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', target):
             await _ip_lookup(event, target)
         elif "@" in target:
-            await _mail_lookup(event, target)
+            await _mail_lookup(event, target, retry=retry)
         elif re.match(r'^\+?[\d\s\-()]{7,}$', target):
             await _phone_lookup(event, target)
         else:
@@ -262,11 +286,56 @@ def _find_holehe():
     return None
 
 
-async def _mail_lookup(event, mail):
+def _mail_cache_path(mail):
+    h = hashlib.sha256(mail.strip().lower().encode()).hexdigest()[:20]
+    return OSINT_MAIL_CACHE_DIR / f"{h}.json"
+
+
+def _load_mail_cache(mail):
+    path = _mail_cache_path(mail)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_mail_cache(mail, found, not_found, errored):
+    path = _mail_cache_path(mail)
+    try:
+        path.write_text(
+            json.dumps(
+                {"mail": mail, "found": found, "not_found": not_found, "errored": errored, "ts": time.time()},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass  # кэш — не критичная штука, без него просто нельзя будет -r
+
+
+async def _mail_lookup(event, mail, retry=False):
     try:
         if not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", mail):
             await safe_edit(event, fmt("ошибка", ["неверный формат почты"]))
             return
+
+        prev = None
+        if retry:
+            prev = _load_mail_cache(mail)
+            if prev is None:
+                await safe_edit(event, fmt("ошибка", [
+                    "нет сохранённого первого прогона для этой почты",
+                    "сначала выполни `.osint почта` без `-r`",
+                ]))
+                return
+            if not prev.get("errored"):
+                await safe_edit(event, fmt("почта", [
+                    f"`{mail}`",
+                    "в прошлый раз ошибок не было — подтягивать нечего",
+                ]))
+                return
 
         holehe_path = _find_holehe()
         if holehe_path is None:
@@ -318,7 +387,32 @@ async def _mail_lookup(event, mail):
             else:
                 errored.append(site)
 
+        resolved_found, resolved_not_found, still_errored = [], [], []
+        if retry:
+            # мёржим: прошлые found/not_found остаются как есть (это уже
+            # достоверный результат), а по доменам, упавшим в прошлый раз
+            # с [x], берём статус из этого, второго, полного прогона.
+            found_set, not_found_set, errored_set = set(found), set(not_found), set(errored)
+            found = list(prev.get("found", []))
+            not_found = list(prev.get("not_found", []))
+            for site in prev.get("errored", []):
+                if site in found_set:
+                    found.append(site)
+                    resolved_found.append(site)
+                elif site in not_found_set:
+                    not_found.append(site)
+                    resolved_not_found.append(site)
+                else:
+                    # либо снова [x], либо модуль для этого домена пропал
+                    # из вывода (версия holehe поменялась) — считаем ошибкой
+                    still_errored.append(site)
+            errored = still_errored
+
+        _save_mail_cache(mail, found, not_found, errored)
+
         rows = [f"`{mail}`"]
+        if retry:
+            rows.append(f"повторный прогон — подтянуто `{len(resolved_found) + len(resolved_not_found)}` из `{len(prev.get('errored', []))}` ошибок")
         if found:
             shown = ", ".join(found[:50])
             if len(found) > 50:
@@ -326,6 +420,8 @@ async def _mail_lookup(event, mail):
             rows.append(f"✔ найдено ({len(found)}) — {shown}")
         else:
             rows.append("✔ найдено — ничего")
+        if retry and resolved_found:
+            rows.append(f"  ↳ новое в найденном: {', '.join(resolved_found[:50])}")
         rows.append(f"— точно не найдено — `{len(not_found)}`")
         if errored:
             shown = ", ".join(errored[:50])
@@ -335,7 +431,7 @@ async def _mail_lookup(event, mail):
         else:
             rows.append("⚠ не удалось проверить — ничего")
 
-        await safe_edit(event, fmt("почта", rows))
+        await safe_edit(event, fmt("почта" + (" (ретрай)" if retry else ""), rows))
     except FileNotFoundError:
         await safe_edit(event, fmt("ошибка", [
             "`holehe` не найден",
@@ -346,3 +442,260 @@ async def _mail_lookup(event, mail):
         await safe_edit(event, fmt("ошибка", [f"holehe упал — `{stderr[:200] or e}`"]))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
+
+
+def _find_exe(name):
+    """Общий поиск консольного скрипта: PATH, затем рядом с текущим
+    интерпретатором (venv/bin) — туда pip кладёт entry_points."""
+    path = shutil.which(name)
+    if path:
+        return path
+    candidate = Path(sys.executable).with_name(f"{name}.exe" if sys.platform == "win32" else name)
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
+@command(r'^\.sherlock(?:\s+(.+))?$', name="sherlock")
+async def sherlock_handler(event, client, state):
+    """.sherlock <юзернейм> — поиск аккаунта на площадках через sherlock-project."""
+    args = event.text.split(" ", 1)
+    if len(args) < 2:
+        await safe_edit(event, get_usage_instructions("sherlock"))
+        return
+    username = args[1].strip()
+    if not re.fullmatch(r"[A-Za-z0-9._\-]{1,40}", username):
+        await safe_edit(event, fmt("ошибка", ["неверный формат юзернейма"]))
+        return
+
+    exe = _find_exe("sherlock")
+    if exe is None:
+        await safe_edit(event, fmt("ошибка", [
+            "`sherlock` не найден",
+            "выполни: `pip install sherlock-project` (или `pip install -r requirements.txt`) и перезапусти бота",
+        ]))
+        return
+
+    try:
+        # --print-all: по умолчанию sherlock печатает только найденное,
+        # нам нужны и не-найденные, чтобы отделить их от реальных ошибок.
+        # --no-color, иначе в выводе ANSI-коды, которые сломают парсинг.
+        result = subprocess.run(
+            [exe, username, "--print-all", "--no-color", "--timeout", "15"],
+            capture_output=True, text=True, shell=False, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        await safe_edit(event, fmt("ошибка", ["sherlock не уложился в таймаут (180с)"]))
+        return
+    except Exception as e:
+        await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
+        return
+
+    found, not_found, errored = [], [], []
+    # формат строки: "[+] Site: URL" / "[-] Site: Not Found!" / "[-] Site: Error ..."
+    line_re = re.compile(r'^\[([+\-])]\s+([^:]+):\s*(.+)$')
+    for line in result.stdout.split("\n"):
+        m = line_re.match(line.strip())
+        if not m:
+            continue
+        mark, site, rest = m.group(1), m.group(2).strip(), m.group(3).strip()
+        if mark == "+":
+            found.append((site, rest))
+        elif "not found" in rest.lower():
+            not_found.append(site)
+        else:
+            errored.append(site)
+
+    rows = [f"`{username}`"]
+    if found:
+        shown = "\n".join(f"  {site} — {url}" for site, url in found[:40])
+        rows.append(f"✔ найдено ({len(found)}):\n{shown}")
+        if len(found) > 40:
+            rows.append(f"  … (+{len(found) - 40})")
+    else:
+        rows.append("✔ найдено — ничего")
+    rows.append(f"— не найдено — `{len(not_found)}`")
+    if errored:
+        rows.append(f"⚠ не удалось проверить — `{len(errored)}`")
+    await safe_edit(event, fmt("sherlock", rows))
+
+
+@command(r'^\.ignorant(?:\s+(.+))?$', name="ignorant")
+async def ignorant_handler(event, client, state):
+    """.ignorant <код_страны> <номер> — где засвечен номер (ignorant).
+    Формат как у самого CLI ignorant: код страны и номер отдельно,
+    например `.ignorant 7 9123456789`, без + и без пробелов внутри номера."""
+    args = event.text.split()
+    if len(args) != 3 or not args[1].isdigit() or not re.fullmatch(r"\d{4,15}", args[2]):
+        await safe_edit(event, get_usage_instructions("ignorant"))
+        return
+    country_code, number = args[1], args[2]
+
+    exe = _find_exe("ignorant")
+    if exe is None:
+        await safe_edit(event, fmt("ошибка", [
+            "`ignorant` не найден",
+            "выполни: `pip install ignorant` (или `pip install -r requirements.txt`) и перезапусти бота",
+        ]))
+        return
+
+    try:
+        result = subprocess.run(
+            [exe, country_code, number],
+            capture_output=True, text=True, shell=False, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        await safe_edit(event, fmt("ошибка", ["ignorant не уложился в таймаут (120с)"]))
+        return
+    except Exception as e:
+        await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
+        return
+
+    found, not_found, errored = [], [], []
+    # формат строки: "[+] Site : сообщение" / "[-] Site : сообщение" / "[x] Site : ошибка"
+    line_re = re.compile(r'^\[([+\-x])]\s+([^:]+?)\s*:\s*(.+)$')
+    for line in result.stdout.split("\n"):
+        m = line_re.match(line.strip())
+        if not m:
+            continue
+        mark, site = m.group(1), m.group(2).strip()
+        if mark == "+":
+            found.append(site)
+        elif mark == "-":
+            not_found.append(site)
+        else:
+            errored.append(site)
+
+    rows = [f"`+{country_code}{number}`"]
+    rows.append(f"✔ привязан — {', '.join(found) if found else 'ничего'}")
+    rows.append(f"— не привязан — `{len(not_found)}`")
+    if errored:
+        rows.append(f"⚠ не удалось проверить — `{len(errored)}`")
+    await safe_edit(event, fmt("ignorant", rows))
+
+
+@command(r'^\.mosint(?:\s+(.+))?$', name="mosint")
+async def mosint_handler(event, client, state):
+    """.mosint <почта> — отчёт mosint (брич-базы, соцсети и т.п.) по почте."""
+    args = event.text.split(" ", 1)
+    if len(args) < 2:
+        await safe_edit(event, get_usage_instructions("mosint"))
+        return
+    mail = args[1].strip()
+    if not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", mail):
+        await safe_edit(event, fmt("ошибка", ["неверный формат почты"]))
+        return
+
+    # mosint — Go-бинарь, не pip-пакет: ставится через
+    # `go install github.com/alpkeskin/mosint/v3/cmd/mosint@latest`
+    exe = shutil.which("mosint")
+    if exe is None:
+        await safe_edit(event, fmt("ошибка", [
+            "`mosint` не найден в PATH",
+            "ставится через go: `go install github.com/alpkeskin/mosint/v3/cmd/mosint@latest`",
+        ]))
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "mosint.json"
+        try:
+            result = subprocess.run(
+                [exe, mail, "-j", str(out_path)],
+                capture_output=True, text=True, shell=False, timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            await safe_edit(event, fmt("ошибка", ["mosint не уложился в таймаут (180с)"]))
+            return
+        except Exception as e:
+            await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
+            return
+
+        if not out_path.is_file():
+            # формат вывода отличается между версиями mosint — если флаг
+            # -j не сработал, показываем хвост обычного терминального вывода
+            tail = (result.stdout or result.stderr or "").strip()[-800:]
+            await safe_edit(event, fmt("mosint", [f"`{mail}`", "не нашёл json-отчёт, сырой вывод:", f"```\n{tail}\n```"]))
+            return
+
+        try:
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception:
+            await safe_edit(event, fmt("ошибка", ["не удалось распарсить json-отчёт mosint"]))
+            return
+
+    # структура json у mosint менялась между версиями — достаём то, что
+    # обычно есть, без жёсткой привязки к схеме; остальное — в сыром виде
+    rows = [f"`{mail}`"]
+    breaches = data.get("Breaches") or data.get("breaches") or []
+    if isinstance(breaches, list):
+        rows.append(f"утечек — `{len(breaches)}`" + (f": {', '.join(str(b) for b in breaches[:20])}" if breaches else ""))
+    socials = data.get("Social") or data.get("social") or data.get("Accounts") or []
+    if isinstance(socials, list) and socials:
+        rows.append(f"соцсети/аккаунты — `{len(socials)}`")
+    if len(rows) == 1:
+        rows.append("```\n" + json.dumps(data, ensure_ascii=False, indent=2)[:1200] + "\n```")
+    await safe_edit(event, fmt("mosint", rows))
+
+
+@command(r'^\.h8mail(?:\s+(.+))?$', name="h8mail")
+async def h8mail_handler(event, client, state):
+    """.h8mail <почта> — поиск почты в утечках/брич-базах через h8mail."""
+    args = event.text.split(" ", 1)
+    if len(args) < 2:
+        await safe_edit(event, get_usage_instructions("h8mail"))
+        return
+    mail = args[1].strip()
+    if not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", mail):
+        await safe_edit(event, fmt("ошибка", ["неверный формат почты"]))
+        return
+
+    exe = _find_exe("h8mail")
+    if exe is None:
+        await safe_edit(event, fmt("ошибка", [
+            "`h8mail` не найден",
+            "выполни: `pip install h8mail` (или `pip install -r requirements.txt`) и перезапусти бота",
+        ]))
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "h8mail.json"
+        try:
+            # без своих API-ключей (config.ini / -c) h8mail проверит только
+            # бесплатные/локальные источники — этого достаточно для базовой
+            # проверки "светилась ли почта хоть где-то в утечках"
+            result = subprocess.run(
+                [exe, "-t", mail, "-j", str(out_path), "-q"],
+                capture_output=True, text=True, shell=False, timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            await safe_edit(event, fmt("ошибка", ["h8mail не уложился в таймаут (180с)"]))
+            return
+        except Exception as e:
+            await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
+            return
+
+        if not out_path.is_file():
+            tail = (result.stdout or result.stderr or "").strip()[-800:]
+            await safe_edit(event, fmt("h8mail", [f"`{mail}`", "не нашёл json-отчёт, сырой вывод:", f"```\n{tail}\n```"]))
+            return
+
+        try:
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception:
+            await safe_edit(event, fmt("ошибка", ["не удалось распарсить json-отчёт h8mail"]))
+            return
+
+    targets = data.get("targets") if isinstance(data, dict) else data
+    rows = [f"`{mail}`"]
+    if isinstance(targets, list) and targets:
+        t = targets[0]
+        pwn_num = t.get("pwn_num", 0)
+        rows.append(f"засветок в утечках — `{pwn_num}`")
+        sources = t.get("data", {})
+        if isinstance(sources, dict) and sources:
+            shown = list(sources.keys())[:20]
+            rows.append(f"источники — {', '.join(shown)}")
+    else:
+        rows.append("структура ответа не распознана, сырой json ниже")
+        rows.append("```\n" + json.dumps(data, ensure_ascii=False, indent=2)[:1200] + "\n```")
+    await safe_edit(event, fmt("h8mail", rows))

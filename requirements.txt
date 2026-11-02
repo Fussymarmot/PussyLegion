@@ -10,3 +10,7 @@ colorama
 python-socks[asyncio]
 fake-useragent
 holehe
+sherlock-project
+ignorant
+h8mail
+# mosint — Go-бинарь, pip сюда не ставит: go install github.com/alpkeskin/mosint/v3/cmd/mosint@latest

@@ -97,9 +97,29 @@ COMMAND_INFO = {
         "example": "`.data`",
     },
     "osint": {
-        "description": "Проверка данных по IP / номеру / почте.",
-        "syntax": "`.osint` [значение]",
-        "example": "`.osint 8.8.8.8`",
+        "description": "Проверка данных по IP / номеру / почте (holehe). Флаг `-r` для почты — повторный прогон, подтягивает домены, упавшие с ошибкой в прошлый раз.",
+        "syntax": "`.osint` [значение] [-r]",
+        "example": "`.osint person@mail.com -r`",
+    },
+    "sherlock": {
+        "description": "Поиск аккаунта по юзернейму на множестве площадок (sherlock-project).",
+        "syntax": "`.sherlock` [юзернейм]",
+        "example": "`.sherlock johndoe`",
+    },
+    "ignorant": {
+        "description": "Проверка, на каких сервисах привязан номер телефона.",
+        "syntax": "`.ignorant` [код_страны] [номер]",
+        "example": "`.ignorant 7 9123456789`",
+    },
+    "mosint": {
+        "description": "Отчёт по почте: утечки, соцсети и т.п. (mosint).",
+        "syntax": "`.mosint` [почта]",
+        "example": "`.mosint person@mail.com`",
+    },
+    "h8mail": {
+        "description": "Поиск почты в брич-базах (h8mail).",
+        "syntax": "`.h8mail` [почта]",
+        "example": "`.h8mail person@mail.com`",
     },
     "whois": {
         "description": "Информация о домене.",
