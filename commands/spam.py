@@ -6,7 +6,7 @@ import aiohttp
 from telethon.errors import FloodWaitError
 from telethon.tl import types
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer
+from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer, username_of
 from logger import exception
 
 try:
@@ -33,7 +33,7 @@ async def spam_handler(event, client, state):
     # падаем здесь — диспетчер сам покажет ошибку или передаст
     # команду следующему аккаунту в пуле
     chat = await event.get_chat()
-    peer = await resolve_peer(client, event.chat_id, getattr(chat, "username", None))
+    peer = await resolve_peer(client, event.chat_id, username_of(chat))
 
     try:
         await event.delete()

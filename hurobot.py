@@ -432,7 +432,7 @@ class HuroBot:
 
 class ClientState:
     def __init__(self):
-        self.typing_animation = False
+        self.animated_chats = set()  # id чатов, где включена .ani — своя анимация на чат
         self.active_animation = None
         self.animation_lock = asyncio.Lock()
         self.pending_confirmation = {}

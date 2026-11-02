@@ -53,6 +53,35 @@ async def resolve_peer(client, chat_id=None, username=None):
     raise ValueError("нет доступа к чату — аккаунт не состоит в нём и нет публичной ссылки")
 
 
+def username_of(entity):
+    """Основной активный юзернейм сущности (чат/пользователь).
+
+    У аккаунтов с несколькими юзернеймами (Telegram это разрешает) старое
+    поле `.username` часто пустое, а реальный юзернейм лежит в `.usernames` —
+    списке объектов с полями `username`/`active`. Без этого фолбэка команды
+    вроде .spam/.up в личке с такими людьми всегда думали, что юзернейма нет.
+    """
+    username = getattr(entity, "username", None)
+    if username:
+        return username
+    for u in getattr(entity, "usernames", None) or []:
+        if getattr(u, "active", True):
+            return getattr(u, "username", None)
+    return None
+
+
+def mention_markdown(user):
+    """Markdown-упоминание пользователя: @username, если он есть, иначе
+    упоминание по id — работает для ЛЮБОГО пользователя независимо от
+    наличия юзернейма, пока у отправляющего аккаунта есть его сущность
+    (access_hash), например он виден в участниках этого же чата."""
+    username = username_of(user)
+    if username:
+        return f"@{username}"
+    name = (getattr(user, "first_name", None) or "участник").strip() or "участник"
+    return f"[{name}](tg://user?id={user.id})"
+
+
 def fmt_uptime(seconds):
     seconds = int(seconds)
     if seconds < 60:
@@ -153,7 +182,7 @@ COMMAND_INFO = {
         "example": "`.delme 1234`",
     },
     "ani": {
-        "description": "Включает или выключает анимацию набора текста.",
+        "description": "Включает/выключает анимацию набора текста — только в этом чате, в остальных не действует.",
         "syntax": "`.ani` [on/off]",
         "example": "`.ani on`",
     },
@@ -272,22 +301,32 @@ async def ping_handler(event, client, state):
 
 @command(r'^\.ani(?:\s+(on|off))?$', name="ani", scope="local")
 async def ani_handler(event, client, state):
+    """Анимация печати запоминается ПО ЧАТУ — включил здесь, в остальных
+    чатах этого же аккаунта сообщения уходят как обычно, мгновенно."""
     state.last_user_activity = time.time()
     action = event.pattern_match.group(1)
+    chat_id = event.chat_id
+    currently_on = chat_id in state.animated_chats
+
     if not action:
-        status = "включена" if state.typing_animation else "выключена"
+        status = "включена" if currently_on else "выключена"
         await safe_edit(event, get_usage_instructions("ani", status=status))
         return
+
     new_state = action.lower() == "on"
-    if new_state == state.typing_animation:
-        status = "включена" if state.typing_animation else "выключена"
-        await safe_edit(event, fmt("анимация уже " + status))
+    if new_state == currently_on:
+        status = "включена" if currently_on else "выключена"
+        await safe_edit(event, fmt("анимация уже " + status + " в этом чате"))
         return
-    state.typing_animation = new_state
-    status = "включена" if new_state else "выключена"
-    await safe_edit(event, fmt(f"анимация {status}"))
-    if not new_state:
+
+    if new_state:
+        state.animated_chats.add(chat_id)
+    else:
+        state.animated_chats.discard(chat_id)
         await state.stop_animation()
+
+    status = "включена" if new_state else "выключена"
+    await safe_edit(event, fmt(f"анимация {status} в этом чате"))
 
 
 @background
@@ -295,19 +334,19 @@ def register_animation(client, state):
     @client.on(events.NewMessage(outgoing=True))
     async def animate_message(event):
         state.last_user_activity = time.time()
-        if not state.typing_animation or not event.text or event.text.startswith("."):
+        if event.chat_id not in state.animated_chats or not event.text or event.text.startswith("."):
             return
         try:
             await state.stop_animation()
             current = ""
             await asyncio.sleep(0.1)
             for char in event.text:
-                if not state.typing_animation:
+                if event.chat_id not in state.animated_chats:
                     break
                 current += char
                 try:
                     await event.edit(current)
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(0.12)
                 except MessageNotModifiedError:
                     continue
                 except Exception:

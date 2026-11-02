@@ -3,7 +3,7 @@ from telethon import events, Button
 from commands import background, command
 from database import db
 from logger import exception
-from commands.utils import fmt, safe_edit, get_moscow_time, resolve_peer
+from commands.utils import fmt, safe_edit, get_moscow_time, resolve_peer, mention_markdown, username_of
 
 
 async def _self_id(client, state):
@@ -158,11 +158,25 @@ async def muteword_handler(event, client, state):
 async def tagall_handler(event, client, state):
     try:
         participants = await client.get_participants(event.chat_id)
-        mentions = " ".join([f"@{p.username}" for p in participants if p.username])
-        if not mentions:
-            await safe_edit(event, fmt("ошибка", ["нет участников с username"]))
+        candidates = [p for p in participants if not getattr(p, "bot", False) and not getattr(p, "deleted", False)]
+        if not candidates:
+            await safe_edit(event, fmt("ошибка", ["нет участников"]))
             return
-        await safe_edit(event, fmt("упоминание", [mentions[:900]]))
+
+        # у юзернеймных — @username, у остальных — упоминание по id
+        # (работает для ЛЮБОГО участника, юзернейм не нужен)
+        mentions = [mention_markdown(p) for p in candidates]
+
+        # Telegram ограничивает число entities в сообщении (~100) и длину —
+        # берём упоминания целиком, не разрезая их посередине
+        chunk, length = [], 0
+        for m in mentions:
+            if len(chunk) >= 90 or length + len(m) + 1 > 3500:
+                break
+            chunk.append(m)
+            length += len(m) + 1
+
+        await safe_edit(event, fmt("упоминание", [" ".join(chunk)]))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
@@ -174,15 +188,18 @@ async def up_handler(event, client, state):
     count = min(int(event.pattern_match.group(1)), 50)
     reply = await event.get_reply_message()
     user = await reply.get_sender()
-    if not user or not user.username:
-        await safe_edit(event, fmt("ошибка", ["у пользователя нет username — .up работает только по нему"]))
+    if not user:
+        await safe_edit(event, fmt("ошибка", ["не нашёл отправителя сообщения"]))
         return
 
+    # @username, если есть, иначе упоминание по id — юзернейм не обязателен
+    mention = mention_markdown(user)
+
     chat = await event.get_chat()
-    peer = await resolve_peer(client, event.chat_id, getattr(chat, "username", None))
+    peer = await resolve_peer(client, event.chat_id, username_of(chat))
 
     for _ in range(count):
-        msg = await client.send_message(peer, f"@{user.username}")
+        msg = await client.send_message(peer, mention, parse_mode="md")
         await msg.delete()
 
 

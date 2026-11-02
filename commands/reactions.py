@@ -7,7 +7,7 @@ from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer
+from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer, username_of
 
 DEFAULT_EMOJI = "❤️"
 DELAY = 0.4  # между аккаунтами, чтобы не словить флуд-вейт сразу у всех
@@ -59,7 +59,7 @@ async def like_handler(event, client, state):
             return
         msg_id = reply.id
         chat = await event.get_chat()
-        username = getattr(chat, "username", None)
+        username = username_of(chat)
         if arg1:
             emoji = arg1
 
@@ -75,6 +75,16 @@ async def like_handler(event, client, state):
         label = bot.router.label(num)
         try:
             peer = await resolve_peer(acc_client, event.chat_id if same_chat else None, username)
+
+            # та же защита, что и в .vote: свежее сообщение иногда не
+            # резолвится в sendReaction (MESSAGE_ID_INVALID), пока сессия
+            # явно его не подтянет через get_messages
+            target = await acc_client.get_messages(peer, ids=msg_id)
+            if target is None:
+                rows.append(f"{label} — сообщение не видно этому аккаунту")
+                await asyncio.sleep(DELAY)
+                continue
+
             await acc_client(SendReactionRequest(
                 peer=peer,
                 msg_id=msg_id,

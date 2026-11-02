@@ -8,7 +8,7 @@ from telethon.tl.functions.messages import SendVoteRequest
 from telethon.tl.types import MessageMediaPoll
 
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer
+from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer, username_of
 
 DELAY = 0.5
 
@@ -68,7 +68,7 @@ async def vote_handler(event, client, state):
     options = [answers[i - 1].option for i in indices]
 
     chat = await event.get_chat()
-    username = getattr(chat, "username", None)
+    username = username_of(chat)
     msg_id = reply.id
 
     await safe_edit(event, fmt("голосую", [f"вариант(ы) — `{', '.join(map(str, indices))}`"]))
@@ -79,6 +79,18 @@ async def vote_handler(event, client, state):
         label = bot.router.label(num)
         try:
             peer = await resolve_peer(acc_client, event.chat_id, username)
+
+            # даже у реального участника чата sendVote иногда отвечает
+            # MESSAGE_ID_INVALID на свежее сообщение, если сессия этого
+            # аккаунта ещё не синхронизировала его саму — явный get_messages
+            # догоняет состояние перед голосованием и заодно подтверждает,
+            # что сообщение этому аккаунту вообще видно
+            target = await acc_client.get_messages(peer, ids=msg_id)
+            if target is None:
+                rows.append(f"{label} — сообщение не видно этому аккаунту")
+                await asyncio.sleep(DELAY)
+                continue
+
             await acc_client(SendVoteRequest(peer=peer, msg_id=msg_id, options=options))
             rows.append(f"{label} — ok")
             ok += 1
