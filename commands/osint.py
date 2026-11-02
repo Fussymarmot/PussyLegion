@@ -600,8 +600,12 @@ async def mosint_handler(event, client, state):
     with tempfile.TemporaryDirectory() as tmp:
         out_path = Path(tmp) / "mosint.json"
         try:
+            # v3: `mosint <email> -o файл.json -s` (не -j — это флаг из
+            # другой версии/форка). -s — silent, чтобы не ловить ANSI-мусор
+            # в stdout. Важно: mosint требует конфиг ~/.mosint.yaml (хотя
+            # бы пустой) — без него может упасть ещё до записи файла.
             result = subprocess.run(
-                [exe, mail, "-j", str(out_path)],
+                [exe, mail, "-o", str(out_path), "-s"],
                 capture_output=True, text=True, shell=False, timeout=180,
             )
         except subprocess.TimeoutExpired:
@@ -612,10 +616,12 @@ async def mosint_handler(event, client, state):
             return
 
         if not out_path.is_file():
-            # формат вывода отличается между версиями mosint — если флаг
-            # -j не сработал, показываем хвост обычного терминального вывода
             tail = (result.stdout or result.stderr or "").strip()[-800:]
-            await safe_edit(event, fmt("mosint", [f"`{mail}`", "не нашёл json-отчёт, сырой вывод:", f"```\n{tail}\n```"]))
+            rows = [f"`{mail}`", "не нашёл json-отчёт"]
+            if "mosint.yaml" in tail or "config" in tail.lower():
+                rows.append("похоже, нет конфига — создай хотя бы пустой `~/.mosint.yaml`")
+            rows.append(f"сырой вывод:\n```\n{tail}\n```")
+            await safe_edit(event, fmt("mosint", rows))
             return
 
         try:
@@ -624,17 +630,34 @@ async def mosint_handler(event, client, state):
             await safe_edit(event, fmt("ошибка", ["не удалось распарсить json-отчёт mosint"]))
             return
 
-    # структура json у mosint менялась между версиями — достаём то, что
-    # обычно есть, без жёсткой привязки к схеме; остальное — в сыром виде
+    # схема json v3 (проверено на реальном прогоне): верхнеуровневые ключи
+    # email/verified/emailrep/breachdirectory/haveibeenpwned/hunter/
+    # instagram_exists/spotify_exists/twitter_exists/google_search/dns_records
     rows = [f"`{mail}`"]
-    breaches = data.get("Breaches") or data.get("breaches") or []
-    if isinstance(breaches, list):
-        rows.append(f"утечек — `{len(breaches)}`" + (f": {', '.join(str(b) for b in breaches[:20])}" if breaches else ""))
-    socials = data.get("Social") or data.get("social") or data.get("Accounts") or []
-    if isinstance(socials, list) and socials:
-        rows.append(f"соцсети/аккаунты — `{len(socials)}`")
-    if len(rows) == 1:
-        rows.append("```\n" + json.dumps(data, ensure_ascii=False, indent=2)[:1200] + "\n```")
+    rows.append(f"синтаксис валиден — `{'да' if data.get('verified') else 'нет'}`")
+
+    socials = [name for key, name in (
+        ("instagram_exists", "instagram"),
+        ("spotify_exists", "spotify"),
+        ("twitter_exists", "twitter"),
+    ) if data.get(key)]
+    rows.append(f"аккаунты — {', '.join(socials) if socials else 'не найдено'}")
+
+    leaks = []
+    bd = data.get("breachdirectory") or {}
+    if bd.get("found"):
+        leaks.append(f"breachdirectory ({bd['found']})")
+    hibp = data.get("haveibeenpwned")
+    if isinstance(hibp, list) and hibp:
+        leaks.append(f"haveibeenpwned ({len(hibp)})")
+    details = (data.get("emailrep") or {}).get("details") or {}
+    if details.get("credentials_leaked") or details.get("data_breach"):
+        leaks.append("emailrep")
+    rows.append(f"утечки — {', '.join(leaks) if leaks else 'не найдено'}")
+
+    if (data.get("emailrep") or {}).get("suspicious"):
+        rows.append("⚠ emailrep отмечает почту как подозрительную")
+
     await safe_edit(event, fmt("mosint", rows))
 
 
