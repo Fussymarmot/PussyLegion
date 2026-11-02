@@ -552,8 +552,9 @@ async def ignorant_handler(event, client, state):
         return
 
     found, not_found, errored = [], [], []
-    # формат строки: "[+] Site : сообщение" / "[-] Site : сообщение" / "[x] Site : ошибка"
-    line_re = re.compile(r'^\[([+\-x])]\s+([^:]+?)\s*:\s*(.+)$')
+    # формат строки: "[+] Site" / "[-] Site" / "[x] Site" — без двоеточия
+    # и без сообщения после имени сайта (в отличие от holehe/sherlock).
+    line_re = re.compile(r'^\[([+\-x])]\s+(\S.*\S|\S)\s*$')
     for line in result.stdout.split("\n"):
         m = line_re.match(line.strip())
         if not m:
@@ -662,9 +663,11 @@ async def h8mail_handler(event, client, state):
         try:
             # без своих API-ключей (config.ini / -c) h8mail проверит только
             # бесплатные/локальные источники — этого достаточно для базовой
-            # проверки "светилась ли почта хоть где-то в утечках"
+            # проверки "светилась ли почта хоть где-то в утечках".
+            # важно: у h8mail нет "тихого" режима — "-q" это --query (тип
+            # цели: email/username/ip/domain), а не флаг громкости.
             result = subprocess.run(
-                [exe, "-t", mail, "-j", str(out_path), "-q"],
+                [exe, "-t", mail, "-j", str(out_path)],
                 capture_output=True, text=True, shell=False, timeout=180,
             )
         except subprocess.TimeoutExpired:
