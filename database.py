@@ -78,20 +78,9 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_cache_date ON msg_cache(date)")
 
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS account_roles (
-                account_id INTEGER PRIMARY KEY,
-                role TEXT NOT NULL DEFAULT 'solo',
-                updated_at TEXT NOT NULL
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+        # таблицы старого мультиаккаунтного режима больше не используются
+        c.execute("DROP TABLE IF EXISTS account_roles")
+        c.execute("DROP TABLE IF EXISTS settings")
 
     log.info("База данных инициализирована")
 

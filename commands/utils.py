@@ -1,26 +1,13 @@
 import asyncio
-import re
 import time
 from datetime import datetime
+
 import pytz
 from telethon import events
-from telethon.errors import (
-    MessageNotModifiedError,
-    MessageIdInvalidError,
-    UserAlreadyParticipantError,
-    FloodWaitError,
-)
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import ExportChatInviteRequest, ImportChatInviteRequest
+from telethon.errors import MessageNotModifiedError
+
 from commands import background, command
 from logger import exception
-
-LINK_HOST_RE = re.compile(
-    r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/',
-    re.IGNORECASE,
-)
-USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,32}$')
-INVITE_RE = re.compile(r'(?:t\.me/(?:\+|joinchat/))([\w-]+)', re.IGNORECASE)
 
 
 def fmt(title, rows=None):
@@ -34,217 +21,8 @@ def fmt(title, rows=None):
     return "\n".join(lines)
 
 
-async def resolve_peer(client, chat_id=None, username=None):
-    """Отдаёт input-peer для произвольного клиента.
-
-    Нужно для команд, которые выполняет не тот аккаунт, что принял
-    исходное событие (рассылка .vote/.like/.spam и т.п. ассистентам, а
-    также .spam/.up в личке): у ассистента в его собственной сессии
-    может не быть кэша этого чата/пользователя, поэтому raw numeric id
-    ему не отдать напрямую — Telethon не резолвит id без access_hash.
-
-    1. сначала пробуем локальный кэш клиента по chat_id (если уже
-       состоит в чате, писал в него раньше, или это просто текущий
-       чат исполнителя — отработает мгновенно, без сети);
-    2. если есть юзернейм (паблик-чат или человек с открытым
-       @username) — резолвим по нему, это работает для ЛЮБОГО
-       аккаунта независимо от членства/переписки;
-    3. если id не закэширован, но аккаунт в чате состоит — подтягиваем
-       список диалогов, чтобы Telethon увидел access_hash;
-    4. иначе — нет доступа, сообщаем явно вместо тихого падения или
-       неожиданного traceback.
-
-    chat_id можно не передавать (None), если резолвить нужно только
-    по ссылке/юзернейму — например, когда чат с сообщением не совпадает
-    с чатом, откуда пришла команда.
-    """
-    if chat_id is not None:
-        try:
-            return await client.get_input_entity(chat_id)
-        except (ValueError, TypeError):
-            pass
-
-    if username:
-        try:
-            return await client.get_input_entity(username)
-        except (ValueError, TypeError):
-            return await client.get_entity(username)
-
-    if chat_id is not None:
-        try:
-            return await client.get_entity(chat_id)
-        except (ValueError, TypeError):
-            pass
-
-        # аккаунт может состоять в чате, но его сессия ещё не видела
-        # этот диалог (свежий вход/переподключение) — список диалогов
-        # заполняет кэш сущностей, после чего id резолвится
-        try:
-            await client.get_dialogs(limit=200)
-            return await client.get_input_entity(chat_id)
-        except (ValueError, TypeError):
-            pass
-
-    raise ValueError("нет доступа к чату — аккаунт не состоит в нём и нет публичной ссылки")
-
-
-def parse_message_link(text):
-    """Разбирает ссылку на сообщение Telegram.
-
-    Возвращает `(username, msg_id, peer_id)`:
-      * публичная ссылка `t.me/name/123` → (name, 123, None);
-      * приватная `t.me/c/123/456` → (None, 456, -100123);
-      * тема/ветка `t.me/name/45/123` → (name, 123, None);
-      * веб-превью `t.me/s/name/123` и `tg://privatepost` — тоже.
-
-    Если это не ссылка на сообщение (или ссылка на инвайт), все три
-    значения будут None.
-    """
-    text = (text or "").strip()
-    if not text:
-        return None, None, None
-
-    private = re.search(
-        r'tg://privatepost\?[^\s#]*channel=(\d+)[^\s#]*post=(\d+)',
-        text,
-        re.IGNORECASE,
-    )
-    if private:
-        return None, int(private.group(2)), int("-100" + private.group(1))
-
-    match = LINK_HOST_RE.search(text)
-    if not match:
-        return None, None, None
-
-    path = text[match.end():].split("?")[0].split("#")[0].strip("/")
-    parts = [p for p in path.split("/") if p]
-    if not parts:
-        return None, None, None
-
-    # web-превью канала: t.me/s/name/123
-    if parts[0].lower() == "s" and len(parts) > 1:
-        parts = parts[1:]
-
-    # приватная ссылка: t.me/c/<внутренний id>/[тема/]<msg_id>
-    if parts[0].lower() == "c" and len(parts) >= 3:
-        internal, tail = parts[1], parts[2:]
-        if internal.isdigit() and tail and all(p.isdigit() for p in tail):
-            return None, int(tail[-1]), int("-100" + internal)
-        return None, None, None
-
-    # публичная ссылка: t.me/name/[тема/]<msg_id>
-    if len(parts) >= 2 and USERNAME_RE.match(parts[0]) and parts[-1].isdigit():
-        return parts[0], int(parts[-1]), None
-
-    return None, None, None
-
-
-async def touch_message(client, peer, msg_id):
-    """Best-effort подтягивает сообщение в сессию клиента.
-
-    Нужно только как помощь перед повтором запроса: у свежего сообщения
-    сессия аккаунта иногда ещё не знает его, и Telegram отвечает
-    MESSAGE_ID_INVALID. Сама по себе проверка ничего не блокирует.
-    """
-    try:
-        return await client.get_messages(peer, ids=msg_id)
-    except Exception:
-        return None
-
-
-async def try_join(client, username=None, inviter=None, invite_entity=None):
-    """Best-effort заводит аккаунт в чат, где лежит сообщение.
-
-    Публичный чат — по юзернейму. Приватный — по инвайт-ссылке, которую
-    берём у исполнителя команды (он в чате и обычно может создать ссылку).
-    Возвращает True только если вход действительно произошёл.
-    """
-    if username:
-        try:
-            await client(JoinChannelRequest(username))
-            return True
-        except UserAlreadyParticipantError:
-            return False
-        except FloodWaitError:
-            raise
-        except Exception as e:
-            exception(f"try_join.username: {e}")
-
-    if inviter is not None and invite_entity is not None:
-        try:
-            invite = await inviter(ExportChatInviteRequest(invite_entity))
-        except FloodWaitError:
-            raise
-        except Exception as e:
-            exception(f"try_join.export: {e}")
-            invite = None
-
-        match = INVITE_RE.search(getattr(invite, "link", "") or "")
-        if not match:
-            return False
-
-        try:
-            await client(ImportChatInviteRequest(match.group(1)))
-            return True
-        except UserAlreadyParticipantError:
-            return False
-        except FloodWaitError:
-            raise
-        except Exception as e:
-            exception(f"try_join.import: {e}")
-
-    return False
-
-
-async def send_with_recovery(acc_client, make_request, peer, msg_id, *,
-                             username=None, inviter=None, invite_entity=None,
-                             resolve=None):
-    """Выполняет запрос с восстановлением после MESSAGE_ID_INVALID.
-
-    1. повторяем после явного get_messages — сообщение иногда просто ещё
-       не разошлось по сессиям;
-    2. если всё равно не выходит — пробуем завести аккаунт в чат и
-       повторяем ещё раз (после `resolve`, чтобы взять свежий access_hash).
-
-    Возвращает True, если пришлось заходить в чат.
-    """
-    last = None
-
-    # две попытки с подтягиванием сообщения: свежий пост иногда доходит
-    # до сессии аккаунта с задержкой
-    for delay in (0.4, 1.0):
-        try:
-            await acc_client(make_request(peer))
-            return False
-        except MessageIdInvalidError as e:
-            last = e
-        await touch_message(acc_client, peer, msg_id)
-        await asyncio.sleep(delay)
-
-    joined = await try_join(
-        acc_client,
-        username=username,
-        inviter=inviter,
-        invite_entity=invite_entity,
-    )
-    if not joined:
-        raise last
-
-    if resolve is not None:
-        peer = await resolve(acc_client)
-    await asyncio.sleep(0.5)
-    await acc_client(make_request(peer))
-    return True
-
-
 def username_of(entity):
-    """Основной активный юзернейм сущности (чат/пользователь).
-
-    У аккаунтов с несколькими юзернеймами (Telegram это разрешает) старое
-    поле `.username` часто пустое, а реальный юзернейм лежит в `.usernames` —
-    списке объектов с полями `username`/`active`. Без этого фолбэка команды
-    вроде .spam/.up в личке с такими людьми всегда думали, что юзернейма нет.
-    """
+    """Основной активный юзернейм сущности (чат/пользователь)."""
     username = getattr(entity, "username", None)
     if username:
         return username
@@ -255,29 +33,12 @@ def username_of(entity):
 
 
 def mention_markdown(user):
-    """Markdown-упоминание пользователя: @username, если он есть, иначе
-    упоминание по id — работает для ЛЮБОГО пользователя независимо от
-    наличия юзернейма, пока у отправляющего аккаунта есть его сущность
-    (access_hash), например он виден в участниках этого же чата."""
+    """Markdown-упоминание: @username, если он есть, иначе по id."""
     username = username_of(user)
     if username:
         return f"@{username}"
     name = (getattr(user, "first_name", None) or "участник").strip() or "участник"
     return f"[{name}](tg://user?id={user.id})"
-
-
-def fmt_uptime(seconds):
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}с"
-    m, s = divmod(seconds, 60)
-    if m < 60:
-        return f"{m}м {s}с"
-    h, m = divmod(m, 60)
-    if h < 24:
-        return f"{h}ч {m}м"
-    d, h = divmod(h, 24)
-    return f"{d}д {h}ч"
 
 
 def get_moscow_time():
@@ -296,99 +57,39 @@ COMMAND_INFO = {
         "example": "`.save`",
     },
     "clone": {
-        "description": "Клонирует пост из канала в избранное по ссылке.",
+        "description": "Клонирует пост из канала в текущий чат по ссылке.",
         "syntax": "`.clone` [url]",
         "example": "`.clone https://t.me/channel/123`",
-    },
-    "start": {
-        "description": "Запускает аккаунт по номеру.",
-        "syntax": "`.start` [id]",
-        "example": "`.start 2`",
-    },
-    "stop": {
-        "description": "Останавливает аккаунт по номеру.",
-        "syntax": "`.stop` [id]",
-        "example": "`.stop 2`",
-    },
-    "autostart": {
-        "description": "Показывает или меняет автозапуск аккаунта при старте бота.",
-        "syntax": "`.autostart` [id] [on/off]",
-        "example": "`.autostart 2 on`",
-    },
-    "addacc": {
-        "description": "Добавляет аккаунт: шлёт код на номер. Дальше `.code`, при 2FA — `.pass`.",
-        "syntax": "`.addacc` [номер]",
-        "example": "`.addacc +79123456789`",
-    },
-    "code": {
-        "description": "Код из Telegram для добавляемого аккаунта. Цифры пиши через дефис.",
-        "syntax": "`.code` [1-2-3-4-5]",
-        "example": "`.code 1-2-3-4-5`",
-    },
-    "pass": {
-        "description": "Пароль 2FA для добавляемого аккаунта.",
-        "syntax": "`.pass` [пароль]",
-        "example": "`.pass мойпароль`",
-    },
-    "delacc": {
-        "description": "Удаляет аккаунт и его сессию после подтверждения.",
-        "syntax": "`.delacc` [id] [код]",
-        "example": "`.delacc 2 1234`",
     },
     "logs": {
         "description": "Присылает последние строки лога в избранное.",
         "syntax": "`.logs` [число строк]",
         "example": "`.logs 30`",
     },
-    "like": {
-        "description": "Ставит реакцию на сообщение со всех запущенных аккаунтов. Ответом на соо или по ссылке t.me.",
-        "syntax": "`.like` [эмодзи] / `.like` [ссылка] [эмодзи]",
-        "example": "`.like 🔥`",
-    },
-    "joinall": {
-        "description": "Заводит все запущенные аккаунты в чат/канал: без аргумента — в текущий, или по ссылке.",
-        "syntax": "`.joinall` [ссылка/юзернейм]",
-        "example": "`.joinall https://t.me/channel`",
-    },
-    "vote": {
-        "description": "Голосует в опросе со всех запущенных аккаунтов. Без номера — покажет варианты.",
-        "syntax": "`.vote` [номер] / `.vote` [1,3] / `.vote` [ссылка] [номер]",
-        "example": "`.vote 2`",
-    },
     "qr": {
-        "description": "Генерирует QR-код из текста/ссылки и присылает картинку в избранное.",
+        "description": "Генерирует QR-код из текста/ссылки и присылает картинку.",
         "syntax": "`.qr` [текст]",
         "example": "`.qr https://example.com`",
     },
-    "delme": {
-        "description": "Удаляет всю переписку в текущем чате после подтверждения.",
-        "syntax": "`.delme` [код]",
-        "example": "`.delme 1234`",
-    },
     "ani": {
-        "description": "Включает/выключает анимацию набора текста — только в этом чате, в остальных не действует.",
+        "description": "Включает/выключает анимацию набора текста в этом чате.",
         "syntax": "`.ani` [on/off]",
         "example": "`.ani on`",
     },
-    "sti": {
-        "description": "Отправляет указанное количество стикеров в ответ на стикер.",
-        "syntax": "`.sti` [число]",
-        "example": "`.sti 10`",
-    },
     "tagall": {
-        "description": "Упоминает всех участников чата через @username.",
+        "description": "Упоминает всех участников чата.",
         "syntax": "`.tagall`",
         "example": "`.tagall`",
+    },
+    "up": {
+        "description": "Многократные упоминания пользователя с удалением.",
+        "syntax": "`.up` [число] (ответом на сообщение)",
+        "example": "`.up 5`",
     },
     "iter": {
         "description": "Экспортирует участников чата в файл и отправляет в избранное.",
         "syntax": "`.iter` [-n]",
         "example": "`.iter -n`",
-    },
-    "up": {
-        "description": "Многократные упоминания пользователя с удалением.",
-        "syntax": "`.up` [число]",
-        "example": "`.up 5`",
     },
     "data": {
         "description": "Информация о пользователе.",
@@ -410,6 +111,11 @@ COMMAND_INFO = {
         "syntax": "`.spam` [количество] [текст]",
         "example": "`.spam 10 Привет`",
     },
+    "sti": {
+        "description": "Отправляет указанное количество стикеров в ответ на стикер.",
+        "syntax": "`.sti` [число]",
+        "example": "`.sti 10`",
+    },
     "crash": {
         "description": "Отправляет стикеры, нагружающие телефон.",
         "syntax": "`.crash`",
@@ -430,25 +136,40 @@ COMMAND_INFO = {
         "syntax": "`.ping`",
         "example": "`.ping`",
     },
-    "role": {
-        "description": "Показывает или меняет роль аккаунта: главный / ассистент / самостоятельный.",
-        "syntax": "`.role` [id] [master/assistant/solo]",
-        "example": "`.role 2 assistant`",
+    "mute": {
+        "description": "Замутить пользователя в личных сообщениях.",
+        "syntax": "`.mute` [срок] (ответом или в лс)",
+        "example": "`.mute 1h`",
     },
-    "accounts": {
-        "description": "Список аккаунтов, их роли и состояние.",
-        "syntax": "`.accounts`",
-        "example": "`.accounts`",
+    "unmute": {
+        "description": "Снимает мут с текущего собеседника.",
+        "syntax": "`.unmute`",
+        "example": "`.unmute`",
     },
-    "all": {
-        "description": "Выполняет следующую команду на всех ассистентах.",
-        "syntax": "`.all` [команда]",
-        "example": "`.all spam 3 привет`",
+    "mutes": {
+        "description": "Список замученных.",
+        "syntax": "`.mutes`",
+        "example": "`.mutes`",
     },
-    "me": {
-        "description": "Выполняет следующую команду на главном аккаунте.",
-        "syntax": "`.me` [команда]",
-        "example": "`.me delme`",
+    "muteword": {
+        "description": "Удаляет сообщения с указанным словом в личных чатах.",
+        "syntax": "`.muteword` [слово]",
+        "example": "`.muteword реклама`",
+    },
+    "unmuteworlds": {
+        "description": "Снимает мут со всех стоп-слов (.muteword) сразу.",
+        "syntax": "`.unmuteworlds`",
+        "example": "`.unmuteworlds`",
+    },
+    "random": {
+        "description": "Случайное число в диапазоне.",
+        "syntax": "`.random` [от]-[до]",
+        "example": "`.random 1-100`",
+    },
+    "dice": {
+        "description": "Бросает кубик.",
+        "syntax": "`.dice`",
+        "example": "`.dice`",
     },
 }
 
@@ -475,7 +196,7 @@ async def safe_edit(event, text, parse_mode="md", **kwargs):
         exception(f"safe_edit: {e}")
 
 
-@command(r'^\.ping$', name="ping", scope="local")
+@command(r'^\.ping$', name="ping")
 async def ping_handler(event, client, state):
     start = time.time()
     await safe_edit(event, "**✦ pong**")
@@ -483,9 +204,9 @@ async def ping_handler(event, client, state):
     await safe_edit(event, fmt("pong", [f"{delta}ms"]))
 
 
-@command(r'^\.ani(?:\s+(on|off))?$', name="ani", scope="local")
+@command(r'^\.ani(?:\s+(on|off))?$', name="ani")
 async def ani_handler(event, client, state):
-    """Анимация печати запоминается ПО ЧАТУ — включил здесь, в остальных
+    """Анимация печати запоминается по чату — включил здесь, в остальных
     чатах этого же аккаунта сообщения уходят как обычно, мгновенно."""
     state.last_user_activity = time.time()
     action = event.pattern_match.group(1)

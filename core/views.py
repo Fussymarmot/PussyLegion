@@ -1,35 +1,17 @@
-"""Прослойки между событием Telegram и обработчиком команды."""
-
-
-class _SilentMessage:
-    """Заглушка для broadcast-режима: правки и удаления ничего не делают."""
-
-    async def edit(self, *args, **kwargs):
-        return self
-
-    async def delete(self, *args, **kwargs):
-        return None
-
-    async def reply(self, *args, **kwargs):
-        return self
+"""Прослойка между событием Telegram и обработчиком команды."""
 
 
 class EventView:
     """Обёртка над Message-событием.
 
-    Нужна для двух вещей:
-      * подменить текст команды на очищенный (без префикса маршрутизации);
-      * подсунуть свой pattern_match;
-      * в режиме broadcast-рассылки погасить правки и удаление сообщения
-        у всех исполнителей, кроме первого.
+    Нужна, чтобы подсунуть обработчику pattern_match от команды: у
+    настоящего события Telethon такого поля нет.
     """
 
-    def __init__(self, event, text, match=None, silent=False, allow_delete=True):
+    def __init__(self, event, text, match=None):
         object.__setattr__(self, "_event", event)
         object.__setattr__(self, "_text", text)
         object.__setattr__(self, "_match", match)
-        object.__setattr__(self, "_silent", silent)
-        object.__setattr__(self, "_allow_delete", allow_delete)
 
     # --- подменённые поля ---
     @property
@@ -44,15 +26,11 @@ class EventView:
     def pattern_match(self):
         return self._match
 
-    # --- действия, которые зависят от режима ---
+    # --- действия ---
     async def edit(self, *args, **kwargs):
-        if self._silent:
-            return _SilentMessage()
         return await self._event.edit(*args, **kwargs)
 
     async def delete(self, *args, **kwargs):
-        if self._silent or not self._allow_delete:
-            return None
         return await self._event.delete(*args, **kwargs)
 
     async def respond(self, *args, **kwargs):

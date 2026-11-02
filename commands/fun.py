@@ -3,7 +3,7 @@ from commands import command
 from commands.utils import fmt, safe_edit
 
 
-@command(r'^\.random(?:\s+(\d+)[-\s](\d+))?$', name="random", scope="local")
+@command(r'^\.random(?:\s+(\d+)[-\s](\d+))?$', name="random")
 async def random_handler(event, client, state):
     args = event.pattern_match.groups()
     if not args or not args[0] or not args[1]:
@@ -20,7 +20,7 @@ async def random_handler(event, client, state):
         await safe_edit(event, fmt("ошибка", ["нужны числа"]))
 
 
-@command(r'^\.dice$', name="dice", scope="local")
+@command(r'^\.dice$', name="dice")
 async def dice_handler(event, client, state):
     value = random.randint(1, 6)
     await safe_edit(event, fmt("кубик", [f"выпало `{value}`"]))

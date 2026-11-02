@@ -3,18 +3,18 @@ from telethon import events, Button
 from commands import background, command
 from database import db
 from logger import exception
-from commands.utils import fmt, safe_edit, get_moscow_time, resolve_peer, mention_markdown, username_of
+from commands.utils import fmt, safe_edit, get_moscow_time, mention_markdown
 
 
 async def _self_id(client, state):
-    """id владельца текущего клиента — чтобы мут/стоп-слова одного
-    аккаунта не применялись к чатам другого аккаунта в мультиаккаунте."""
-    sid = getattr(state, "_tg_user_id", None)
-    if sid is None:
+    """id владельца единственного аккаунта — ключ, под которым хранятся
+    муты и стоп-слова."""
+    owner_id = getattr(state, "owner_id", None)
+    if owner_id is None:
         me = await client.get_me()
-        sid = me.id
-        state._tg_user_id = sid
-    return sid
+        owner_id = me.id
+        state.owner_id = owner_id
+    return owner_id
 
 
 def fmt_time(seconds):
@@ -30,7 +30,7 @@ def fmt_time(seconds):
     return f"{d}д {h}ч"
 
 
-@command(r'^\.mute(?:\s+(\S+))?$', name="mute", scope="local")
+@command(r'^\.mute(?:\s+(\S+))?$', name="mute")
 async def mute_handler(event, client, state):
     if not event.is_private:
         await safe_edit(event, fmt("ошибка", ["мут работает только в лс"]))
@@ -95,7 +95,7 @@ async def mute_handler(event, client, state):
         exception("mute_handler")
 
 
-@command(r'^\.unmute$', name="unmute", scope="local")
+@command(r'^\.unmute$', name="unmute")
 async def unmute_handler(event, client, state):
     if not event.is_private:
         await safe_edit(event, fmt("ошибка", ["только в лс"]))
@@ -121,7 +121,7 @@ async def unmute_handler(event, client, state):
         await safe_edit(event, fmt("ошибка", ["этот пользователь не в муте"]))
 
 
-@command(r'^\.mutes$', name="mutes", scope="local")
+@command(r'^\.mutes$', name="mutes")
 async def mutes_list_handler(event, client, state):
     with db() as conn:
         rows = conn.execute(
@@ -143,7 +143,7 @@ async def mutes_list_handler(event, client, state):
     await safe_edit(event, fmt("замученные", lines))
 
 
-@command(r'^\.muteword\s+(.+)$', name="muteword", scope="local")
+@command(r'^\.muteword\s+(.+)$', name="muteword")
 async def muteword_handler(event, client, state):
     word = event.pattern_match.group(1).strip().lower()
     with db() as conn:
@@ -154,7 +154,21 @@ async def muteword_handler(event, client, state):
     await safe_edit(event, fmt("слово в муте", [f"`{word}`"]))
 
 
-@command(r'^\.tagall$', name="tagall", scope="remote")
+@command(r'^\.unmuteworlds$', name="unmuteworlds")
+async def unmuteworlds_handler(event, client, state):
+    """Снимает мут со всех стоп-слов (.muteword), заданных владельцем."""
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM mute_words WHERE user_id = ?",
+            (event.sender_id,),
+        )
+    if cur.rowcount:
+        await safe_edit(event, fmt("стоп-слова сняты", [f"удалено — `{cur.rowcount}`"]))
+    else:
+        await safe_edit(event, fmt("нет стоп-слов"))
+
+
+@command(r'^\.tagall$', name="tagall")
 async def tagall_handler(event, client, state):
     try:
         participants = await client.get_participants(event.chat_id)
@@ -181,7 +195,7 @@ async def tagall_handler(event, client, state):
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
 
-@command(r'^\.up\s+(\d+)\s*$', name="up", scope="remote")
+@command(r'^\.up\s+(\d+)\s*$', name="up")
 async def up_handler(event, client, state):
     if not event.is_reply:
         return
@@ -195,21 +209,28 @@ async def up_handler(event, client, state):
     # @username, если есть, иначе упоминание по id — юзернейм не обязателен
     mention = mention_markdown(user)
 
-    chat = await event.get_chat()
-    peer = await resolve_peer(client, event.chat_id, username_of(chat))
-
     for _ in range(count):
-        msg = await client.send_message(peer, mention, parse_mode="md")
+        msg = await client.send_message(event.chat_id, mention, parse_mode="md")
         await msg.delete()
 
 
-@command(r'^\.iter(?:\s+(-n))?$', name="iter", scope="local")
+@command(r'^\.iter(?:\s+(-n))?$', name="iter")
 async def iter_handler(event, client, state):
     only_phone = event.pattern_match.group(1) == "-n"
     try:
         chat = await event.get_chat()
         chat_link = f"https://t.me/{chat.username}" if getattr(chat, "username", None) else "чат без ссылки"
-        participants = await client.get_participants(event.chat_id)
+
+        # у личных чатов (диалог 1-на-1) нет списка "участников" —
+        # get_participants рассчитан только на группы/каналы и там либо
+        # падает с ошибкой, либо отдаёт пусто, из-за чего казалось, что
+        # команда "не видит" собеседника. В личке участник только один —
+        # сам собеседник, берём его напрямую.
+        if getattr(chat, "is_user", False) or event.is_private:
+            participants = [chat]
+        else:
+            participants = await client.get_participants(event.chat_id)
+
         if not participants:
             await safe_edit(event, fmt("ошибка", ["нет участников"]))
             return

@@ -30,28 +30,19 @@ PROXY_SECRET = (os.getenv("PROXY_SECRET") or "").strip()
 PROXY_ENABLED = bool(PROXY_TYPE and PROXY_HOST and PROXY_PORT)
 
 
-AUTOSTART_RAW = (os.getenv("AUTOSTART") or "").strip()
-AUTOSTART_IDS = set()
-if AUTOSTART_RAW:
-    for part in AUTOSTART_RAW.split(","):
-        part = part.strip()
-        if part.isdigit():
-            AUTOSTART_IDS.add(int(part))
-
-
 def _parse_ids(raw):
     ids = set()
-    for part in (raw or "").split(","):
+    for part in raw.split(","):
         part = part.strip()
         if part.isdigit():
             ids.add(int(part))
     return ids
 
 
-# главный аккаунт (управляет ассистентами), можно несколько через запятую
-MASTER_RAW = (os.getenv("MASTER_IDS") or "").strip()
-MASTER_IDS = _parse_ids(MASTER_RAW)
-
+# ID аккаунта, чья сессия считается основной. Нужен только для разовой
+# миграции со старого мультиаккаунтного формата: если не задан, основным
+# станет аккаунт с ролью master, иначе самый первый по номеру.
+MASTER_IDS = _parse_ids((os.getenv("MASTER_IDS") or "").strip())
 
 
 def get_telethon_proxy():
@@ -125,7 +116,9 @@ LOG_PATH = LOG_DIR / "pussylegion.log"
 PID_PATH = DATA_ROOT / "pussylegion.pid"
 
 SESSION_PREFIX = "account_"
-TEMP_SESSION = str(TEMP_DIR / "temp.session")
+
+# единственная рабочая сессия бота
+MAIN_SESSION = SESSION_DIR / "main.session"
 
 COLORS = {
     "header": "\033[91m",

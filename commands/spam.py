@@ -6,7 +6,7 @@ import aiohttp
 from telethon.errors import FloodWaitError
 from telethon.tl import types
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer, username_of
+from commands.utils import fmt, safe_edit, get_usage_instructions
 from logger import exception
 
 try:
@@ -15,7 +15,7 @@ except ImportError:
     UserAgent = None
 
 
-@command(r'^\.spam(?:\s+(\d+)\s+(.+))?$', name="spam", scope="remote")
+@command(r'^\.spam(?:\s+(\d+)\s+(.+))?$', name="spam")
 async def spam_handler(event, client, state):
     args = event.pattern_match.groups()
     if not args or not args[0] or not args[1]:
@@ -28,24 +28,19 @@ async def spam_handler(event, client, state):
         await safe_edit(event, fmt("ошибка", ["максимум 250"]))
         return
 
-    # резолвим чат ДО удаления команды и ДО рассылки: если у этого
-    # аккаунта нет доступа к чату (например, он не состоит в нём),
-    # падаем здесь — диспетчер сам покажет ошибку или передаст
-    # команду следующему аккаунту в пуле
-    chat = await event.get_chat()
-    peer = await resolve_peer(client, event.chat_id, username_of(chat))
-
+    # удаляем команду до рассылки, чтобы она не попала в счётчик и не
+    # висела в чате; чат известен из самого события
     try:
         await event.delete()
     except Exception:
         pass
 
     for _ in range(count):
-        await client.send_message(peer, message)
+        await client.send_message(event.chat_id, message)
         await asyncio.sleep(0.5)
 
 
-@command(r'^\.sti(?:\s+(\d+))?$', name="sti", scope="remote")
+@command(r'^\.sti(?:\s+(\d+))?$', name="sti")
 async def sti_handler(event, client, state):
     count = event.pattern_match.group(1)
     if not count or not event.is_reply:
@@ -69,7 +64,7 @@ async def sti_handler(event, client, state):
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
 
-@command(r'^\.crash$', name="crash", scope="remote")
+@command(r'^\.crash$', name="crash")
 async def crash_handler(event, client, state):
     try:
         await event.delete()
@@ -91,7 +86,7 @@ async def crash_handler(event, client, state):
         exception(f"crash: {e}")
 
 
-@command(r'^\.bomb(?:\s+(.+))?$', name="bomb", scope="local")
+@command(r'^\.bomb(?:\s+(.+))?$', name="bomb")
 async def bomb_handler(event, client, state):
     number = event.pattern_match.group(1)
     if not number:

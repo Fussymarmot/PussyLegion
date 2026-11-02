@@ -3,6 +3,7 @@ import getpass
 import sys
 import re
 import importlib
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -17,9 +18,8 @@ from telethon.errors.rpcerrorlist import TimedOutError
 
 from config import (
     API_ID, API_HASH, VERSION, COLORS, SESSION_DIR, SESSION_PREFIX,
-    TEMP_SESSION, PROXY_ENABLED, PROXY_TYPE, PROXY_HOST,
-    AUTOSTART_IDS,
-    get_telethon_proxy,
+    MAIN_SESSION, PROXY_ENABLED, PROXY_TYPE, PROXY_HOST,
+    MASTER_IDS, get_telethon_proxy,
 )
 
 from logger import info, success, error, warning, exception, log
@@ -27,8 +27,6 @@ from database import db, init_db, cleanup_old_data
 
 from commands import get_backgrounds
 from core.dispatcher import attach as attach_dispatcher
-from core.roles import RoleStore
-from core.router import AccountRouter
 
 
 PHONE_RE = re.compile(r'^\+\d{8,15}$')
@@ -80,354 +78,94 @@ def banner():
     print(f"{COLORS['header']}                    {VERSION}{COLORS['reset']}")
 
 
-class HuroBot:
-    def __init__(self):
-        self.accounts = {}
-        self.running = set()
-        self.clients = {}
-        self.pending_auth = {}
-        self.pending_phone = None
-        self.autostart = self.load_autostart()
-        self.started_at = {}
-        self.starting = set()
-        self.roles = RoleStore()
-        self.router = AccountRouter(self)
+def _session_variants(base):
+    """Все файлы, которые SQLite/Telethon могут создать рядом с сессией."""
+    return [Path(str(base) + suffix) for suffix in ("", "-journal", "-wal", "-shm")]
 
-    @staticmethod
-    def load_autostart():
-        """Сохранённый список (БД) главнее значения AUTOSTART из .env."""
+
+def _remove_session(base):
+    for path in _session_variants(base):
         try:
-            with db() as conn:
-                row = conn.execute("SELECT value FROM settings WHERE key = 'autostart'").fetchone()
+            path.unlink()
+        except FileNotFoundError:
+            pass
         except Exception:
-            row = None
-        if row is None:
-            return set(AUTOSTART_IDS)
-        return {int(x) for x in (row["value"] or "").split(",") if x.strip().isdigit()}
+            exception(f"удаление сессии {path}")
 
-    def set_autostart(self, num, enabled):
-        if enabled:
-            self.autostart.add(num)
-        else:
-            self.autostart.discard(num)
-        self.save_autostart()
 
-    def save_autostart(self):
-        value = ",".join(str(x) for x in sorted(self.autostart))
+def _legacy_sessions():
+    """Старые сессии мультиаккаунтного режима: account_1.session и т.п."""
+    found = []
+    for f in SESSION_DIR.iterdir():
+        if not f.name.startswith(SESSION_PREFIX) or f.suffix != ".session":
+            continue
+        num = f.stem[len(SESSION_PREFIX):]
+        if num.isdigit():
+            found.append((int(num), f))
+    return sorted(found)
+
+
+def _legacy_master_id():
+    """Роль master из старой базы — приоритетный кандидат в основную сессию."""
+    try:
         with db() as conn:
-            conn.execute(
-                "INSERT INTO settings (key, value) VALUES ('autostart', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (value,),
-            )
+            row = conn.execute(
+                "SELECT account_id FROM account_roles WHERE role = 'master' "
+                "ORDER BY account_id LIMIT 1"
+            ).fetchone()
+        return int(row["account_id"]) if row else None
+    except Exception:
+        return None
 
-    async def load_accounts(self):
-        self.accounts = {}
-        for f in SESSION_DIR.iterdir():
-            if not f.name.startswith(SESSION_PREFIX) or f.suffix != ".session":
-                continue
+
+def migrate_sessions():
+    """Оставляет одну основную сессию, остальные удаляет.
+
+    Порядок выбора: master из старой базы → MASTER_IDS из .env → самый
+    первый account_N. Если main.session уже есть, старые файлы просто
+    вычищаются. Возвращает путь к основной сессии.
+    """
+    legacy = _legacy_sessions()
+
+    if MAIN_SESSION.exists() or not legacy:
+        for _, path in legacy:
+            _remove_session(path)
+        return str(MAIN_SESSION)
+
+    wanted = _legacy_master_id()
+    if wanted is None and MASTER_IDS:
+        wanted = min(MASTER_IDS)
+
+    chosen_num, chosen = legacy[0]
+    if wanted is not None:
+        for num, path in legacy:
+            if num == wanted:
+                chosen_num, chosen = num, path
+                break
+
+    info(f"миграция: основной аккаунт #{chosen_num} ({chosen.name})")
+
+    for suffix in ("-journal", "-wal", "-shm"):
+        src = Path(str(chosen) + suffix)
+        if src.exists():
             try:
-                client = make_client(str(f))
-                async with client:
-                    if await client.is_user_authorized():
-                        me = await client.get_me()
-                        account_id = int(f.stem.split("_")[1])
-                        self.accounts[account_id] = {
-                            "phone": me.phone,
-                            "name": me.username or me.first_name or f"Аккаунт {account_id}",
-                            "session": str(f),
-                        }
+                src.replace(Path(str(MAIN_SESSION) + suffix))
             except Exception:
-                exception(f"Загрузка сессии {f.name}")
+                exception(f"перенос {src}")
 
-        self.roles.ensure_defaults(self.accounts.keys())
+    try:
+        chosen.replace(MAIN_SESSION)
+    except Exception:
+        exception(f"перенос {chosen}")
+        return str(chosen)
 
-    async def start_account(self, num):
-        if num in self.running:
-            return {"ok": True, "message": "уже запущен"}
-        if num in self.starting:
-            return {"ok": False, "error": "запуск уже идёт"}
+    for num, path in legacy:
+        if path == chosen:
+            continue
+        _remove_session(path)
+        warning(f"удалена лишняя сессия #{num}")
 
-        acc = self.accounts.get(num)
-        if not acc:
-            return {"ok": False, "error": "аккаунт не найден"}
-
-        self.starting.add(num)
-
-        try:
-            name = acc["name"]
-
-            client = make_client(acc["session"])
-
-            try:
-                await asyncio.wait_for(client.connect(), timeout=15)
-            except asyncio.TimeoutError:
-                warning(f"аккаунт #{num}: таймаут подключения")
-                return {"ok": False, "error": "таймаут подключения"}
-            except Exception as e:
-                exception("start_account.connect")
-                warning(f"аккаунт #{num}: ошибка {e}")
-                return {"ok": False, "error": str(e)}
-
-            if not await client.is_user_authorized():
-                warning(f"аккаунт #{num}: сессия не авторизована")
-                await client.disconnect()
-                return {"ok": False, "error": "сессия не авторизована"}
-
-            state = ClientState()
-            state.bot = self
-            state.account_id = num
-            state.role = self.roles.get(num)
-            client._hurobot_state = state
-
-            loaded = 0
-            if state.role != "assistant":
-                @client.on(events.NewMessage(incoming=True))
-                async def _stats(event):
-                    await stats_collector(event)
-
-                attach_dispatcher(client, state, self, num)
-                loaded += 1
-
-                for register_fn in get_backgrounds():
-                    try:
-                        register_fn(client, state)
-                        loaded += 1
-                    except Exception:
-                        exception(f"Загрузка {register_fn.__name__}")
-
-            # ассистент — чистый исполнитель: ни команд, ни фоновых слушателей
-            self.clients[num] = client
-            self.running.add(num)
-            self.started_at[num] = asyncio.get_event_loop().time()
-
-            role_title = "ассистент" if state.role == "assistant" else state.role
-            success(
-                f"аккаунт #{num} ({name}) запущен — {role_title}"
-                + (f", обработчиков: {loaded}" if loaded else "")
-            )
-
-            asyncio.create_task(self._run_client(num, client))
-
-            return {"ok": True, "message": f"аккаунт {name} запущен"}
-
-        finally:
-            self.starting.discard(num)
-
-    async def _run_client(self, num, client):
-        acc = self.accounts.get(num, {})
-        name = acc.get("name", f"#{num}")
-        try:
-            while num in self.running:
-                try:
-                    await client.run_until_disconnected()
-                    break
-                except (ConnectionError, TimeoutError, TimedOutError):
-                    warning(f"аккаунт {name}: соединение потеряно, переподключение...")
-                    await asyncio.sleep(5)
-                    try:
-                        await client.connect()
-                    except Exception:
-                        await asyncio.sleep(30)
-        except Exception:
-            exception(f"_run_client {num}")
-        finally:
-            if self.clients.get(num) is client:
-                self.running.discard(num)
-                self.clients.pop(num, None)
-                self.started_at.pop(num, None)
-                self.starting.discard(num)
-                warning(f"аккаунт {name}: остановлен")
-
-    async def stop_account(self, num):
-        acc = self.accounts.get(num, {})
-        name = acc.get("name", f"#{num}")
-        self.starting.discard(num)
-        if num in self.running:
-            self.running.discard(num)
-        client = self.clients.pop(num, None)
-        if client:
-            try:
-                if client.is_connected():
-                    await client.disconnect()
-            except Exception:
-                pass
-        self.started_at.pop(num, None)
-
-        warning(f"аккаунт #{num} ({name}) остановлен")
-        return {"ok": True}
-
-    async def set_role(self, num, role):
-        """Меняет роль аккаунта и при необходимости перезапускает его.
-
-        Назначение нового главного автоматически переводит старого
-        в ассистенты — так не остаётся двух управляющих аккаунтов.
-        """
-        from core.roles import ROLES
-
-        if num not in self.accounts:
-            return {"ok": False, "error": "аккаунт не найден"}
-        normalized = (role or "").strip().lower()
-        if normalized not in ROLES:
-            return {"ok": False, "error": "роли: master, assistant, solo"}
-
-        if normalized == "assistant" and self.roles.masters() == [num]:
-            return {"ok": False, "error": "это единственный главный — сначала назначь другого"}
-
-        changed = {num}
-        if normalized == "master":
-            for other in self.roles.masters():
-                if other != num:
-                    self.roles.set(other, "assistant")
-                    changed.add(other)
-
-        new_role = self.roles.set(num, normalized)
-
-        restarted = []
-        for account_id in changed:
-            if account_id in self.running:
-                await self.stop_account(account_id)
-                await asyncio.sleep(1)
-                await self.start_account(account_id)
-                restarted.append(account_id)
-        return {"ok": True, "role": new_role, "restarted": restarted}
-
-    async def delete_account(self, num):
-        acc = self.accounts.get(num)
-        if not acc:
-            return {"ok": False, "error": "аккаунт не найден"}
-
-        await self.stop_account(num)
-
-        try:
-            p = Path(acc["session"])
-            if p.exists():
-                p.unlink()
-        except Exception:
-            exception(f"Удаление {acc['session']}")
-
-        self.accounts.pop(num, None)
-        self.set_autostart(num, False)
-        self.roles.delete(num)
-
-        warning(f"удалён аккаунт #{num}")
-        return {"ok": True}
-
-    async def start_add_account(self, phone):
-        clean = phone.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-        if not clean.startswith("+"):
-            clean = "+" + clean.lstrip("+")
-        if not PHONE_RE.match(clean):
-            return {"ok": False, "error": "неверный формат номера. пример: +79123456789"}
-        phone = clean
-
-        p = Path(TEMP_SESSION)
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            fp = Path(str(p) + suffix)
-            if fp.exists():
-                try:
-                    fp.unlink()
-                except PermissionError:
-                    pass
-
-        client = None
-        try:
-            info(f"добавление аккаунта {phone}")
-
-            client = make_client(TEMP_SESSION)
-            await asyncio.wait_for(client.connect(), timeout=15)
-            sent = await client.send_code_request(phone)
-
-            self.pending_auth[phone] = {
-                "client": client,
-                "phone_code_hash": sent.phone_code_hash,
-                "stage": "code",
-            }
-
-            success(f"код отправлен на {phone}")
-            return {"ok": True, "stage": "code", "phone": phone}
-
-        except PhoneNumberInvalidError:
-            if client and client.is_connected():
-                await client.disconnect()
-            return {"ok": False, "error": "неверный номер"}
-        except asyncio.TimeoutError:
-            if client and client.is_connected():
-                await client.disconnect()
-            return {"ok": False, "error": "таймаут подключения"}
-        except Exception as e:
-            exception("start_add_account")
-            if client and client.is_connected():
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-            return {"ok": False, "error": str(e)}
-
-    async def complete_add_account(self, phone, code=None, password=None):
-        pending = self.pending_auth.get(phone)
-        if not pending:
-            return {"ok": False, "error": "сессия истекла"}
-
-        client = pending["client"]
-
-        try:
-            if password is None:
-                try:
-                    await client.sign_in(phone, code=code, phone_code_hash=pending["phone_code_hash"])
-                except SessionPasswordNeededError:
-                    info("требуется 2fa пароль")
-                    return {"ok": False, "need_password": True}
-            else:
-                try:
-                    await client.sign_in(password=password)
-                except PasswordHashInvalidError:
-                    warning("неверный 2fa пароль")
-                    return {"ok": False, "error": "неверный пароль"}
-
-            me = await client.get_me()
-            account_id = max(self.accounts.keys(), default=0) + 1
-            new_session = SESSION_DIR / f"{SESSION_PREFIX}{account_id}.session"
-
-            await client.disconnect()
-            await asyncio.sleep(1)
-
-            p = Path(TEMP_SESSION)
-            if p.exists():
-                if new_session.exists():
-                    new_session.unlink()
-                p.rename(new_session)
-
-            self.accounts[account_id] = {
-                "phone": phone,
-                "name": me.first_name or me.username or f"Аккаунт {account_id}",
-                "session": str(new_session),
-            }
-
-            new_role = self.roles.default_role_for_new()
-            self.roles.set(account_id, new_role)
-
-            self.pending_auth.pop(phone, None)
-            success(f"аккаунт {me.first_name} добавлен ({new_role})")
-            return {"ok": True}
-
-        except PhoneCodeInvalidError:
-            return {"ok": False, "error": "неверный код"}
-        except Exception as e:
-            exception("complete_add_account")
-            return {"ok": False, "error": str(e)}
-
-    async def autostart_accounts(self):
-        # без панели главный/самостоятельный аккаунт должен подниматься сам —
-        # иначе некому принимать команды. Ассистенты — по списку автостарта
-        # или по требованию (их поднимает диспетчер).
-        wanted = set(self.autostart) | {
-            a for a in self.accounts if self.roles.get(a) != "assistant"
-        }
-        for num in sorted(wanted):
-            if num in self.accounts and num not in self.running and num not in self.starting:
-                await self.start_account(num)
-                await asyncio.sleep(1)
+    return str(MAIN_SESSION)
 
 
 class ClientState:
@@ -439,8 +177,7 @@ class ClientState:
         self.current_message_id = None
         self.last_user_activity = 0
         self.bot = None
-        self.account_id = None
-        self.role = "solo"
+        self.owner_id = None
 
     async def stop_animation(self):
         async with self.animation_lock:
@@ -452,6 +189,145 @@ class ClientState:
                     pass
                 self.active_animation = None
             self.current_message_id = None
+
+
+class HuroBot:
+    def __init__(self):
+        self.client = None
+        self.state = None
+        self.me = None
+        self.started_at = None
+
+    async def start(self, session_path=None):
+        session_path = session_path or migrate_sessions()
+        self.client = make_client(session_path)
+
+        try:
+            await asyncio.wait_for(self.client.connect(), timeout=20)
+        except asyncio.TimeoutError:
+            error("таймаут подключения к Telegram")
+            return False
+        except Exception as e:
+            exception("start.connect")
+            error(f"не удалось подключиться: {e}")
+            return False
+
+        try:
+            if not await self.client.is_user_authorized():
+                warning("сессия не авторизована — вход из консоли")
+                if not await self.console_login():
+                    return False
+        except Exception:
+            exception("start.authorize")
+            return False
+
+        self.me = await self.client.get_me()
+        self.state = ClientState()
+        self.state.bot = self
+        self.state.owner_id = self.me.id
+
+        attach_dispatcher(self.client, self.state)
+
+        @self.client.on(events.NewMessage(incoming=True))
+        async def _stats(event):
+            await stats_collector(event)
+
+        loaded = 1
+        for register_fn in get_backgrounds():
+            try:
+                register_fn(self.client, self.state)
+                loaded += 1
+            except Exception:
+                exception(f"Загрузка {register_fn.__name__}")
+
+        self.started_at = time.time()
+        name = self.me.username or self.me.first_name or str(self.me.id)
+        success(f"аккаунт {name} (#{self.me.id}) запущен, обработчиков: {loaded}")
+        return True
+
+    async def console_login(self):
+        """Первый вход: номер, код, при необходимости пароль 2FA."""
+        ask = lambda prompt: asyncio.to_thread(input, prompt)
+
+        while True:
+            raw = (await ask("номер телефона (+79123456789): ")).strip()
+            phone = raw.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            if not phone.startswith("+"):
+                phone = "+" + phone.lstrip("+")
+            if not PHONE_RE.match(phone):
+                error("неверный формат номера, пример: +79123456789")
+                continue
+            try:
+                sent = await self.client.send_code_request(phone)
+                break
+            except PhoneNumberInvalidError:
+                error("неверный номер")
+            except Exception as e:
+                exception("console_login.send_code")
+                error(f"не удалось отправить код: {e}")
+
+        need_password = False
+        while True:
+            if not need_password:
+                code = "".join(ch for ch in (await ask("код из Telegram: ")) if ch.isdigit())
+                try:
+                    await self.client.sign_in(phone, code=code, phone_code_hash=sent.phone_code_hash)
+                    return True
+                except SessionPasswordNeededError:
+                    need_password = True
+                    continue
+                except PhoneCodeInvalidError:
+                    error("неверный код")
+                    continue
+                except Exception as e:
+                    exception("console_login.sign_in")
+                    error(f"не удалось войти: {e}")
+                    return False
+            else:
+                password = await asyncio.to_thread(getpass.getpass, "пароль 2FA: ")
+                try:
+                    await self.client.sign_in(password=password)
+                    return True
+                except PasswordHashInvalidError:
+                    error("неверный пароль")
+                    continue
+                except Exception as e:
+                    exception("console_login.password")
+                    error(f"не удалось войти: {e}")
+                    return False
+
+    async def run(self):
+        """Держит соединение живым, переподключаясь при обрывах."""
+        while True:
+            try:
+                await self.client.run_until_disconnected()
+                break
+            except (ConnectionError, TimeoutError, TimedOutError):
+                warning("соединение потеряно, переподключение...")
+                await asyncio.sleep(5)
+                try:
+                    await self.client.connect()
+                except Exception:
+                    await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                exception("run")
+                await asyncio.sleep(10)
+                try:
+                    await self.client.connect()
+                except Exception:
+                    await asyncio.sleep(30)
+
+    async def stop(self):
+        await self.state.stop_animation() if self.state else None
+        if self.client and self.client.is_connected():
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+        if self.me:
+            warning(f"аккаунт {self.me.username or self.me.first_name or self.me.id} остановлен")
 
 
 def ensure_api_credentials():
@@ -489,7 +365,6 @@ def make_client(session_path):
 
 
 async def stats_collector(event):
-    from database import db
     try:
         if not event.is_private:
             return
@@ -502,40 +377,6 @@ async def stats_collector(event):
             )
     except Exception:
         pass
-
-
-async def console_add_first_account(bot):
-    """Первый аккаунт добавляется из консоли — команд ещё некому принимать."""
-    ask = lambda prompt: asyncio.to_thread(input, prompt)
-
-    print()
-    info("аккаунтов нет — добавим первый, он станет главным")
-    phone = None
-    while not phone:
-        raw = (await ask("номер телефона (+79123456789): ")).strip()
-        result = await bot.start_add_account(raw)
-        if result.get("ok"):
-            phone = result["phone"]
-        else:
-            error(result.get("error", "не удалось отправить код"))
-
-    need_password = False
-    while True:
-        if not need_password:
-            code = "".join(ch for ch in (await ask("код из Telegram: ")) if ch.isdigit())
-            result = await bot.complete_add_account(phone, code=code)
-        else:
-            password = await asyncio.to_thread(getpass.getpass, "пароль 2FA: ")
-            result = await bot.complete_add_account(phone, password=password)
-
-        if result.get("ok"):
-            return True
-        if result.get("need_password"):
-            need_password = True
-            continue
-        error(result.get("error", "не удалось войти"))
-        if result.get("error") == "сессия истекла":
-            return False
 
 
 async def main():
@@ -551,40 +392,32 @@ async def main():
     else:
         info("прокси не задан")
 
+    # миграция идёт до init_db: тот удаляет старую таблицу ролей, по которой
+    # выбирается основная сессия
+    session_path = migrate_sessions()
+
     init_db()
     cleanup_old_data(days=30)
 
     bot = HuroBot()
-    await bot.load_accounts()
-
-    if not bot.accounts:
-        if not await console_add_first_account(bot):
-            error("аккаунт не добавлен, запусти бота заново")
-            return
-        await bot.load_accounts()
+    if not await bot.start(session_path):
+        error("бот не запущен")
+        return
 
     print()
-    print(f"  {COLORS['accent2']}→{COLORS['reset']} {COLORS['info']}аккаунтов:{COLORS['reset']} {COLORS['accent3']}{len(bot.accounts)}{COLORS['reset']}")
-    masters = bot.roles.masters()
-    assistants = bot.roles.assistants()
-    print(f"  {COLORS['accent2']}→{COLORS['reset']} {COLORS['info']}главный:{COLORS['reset']} "
-          f"{COLORS['accent4']}{', '.join(f'#{m}' for m in masters) or '—'}{COLORS['reset']}"
-          f" {COLORS['accent2']}·{COLORS['reset']} {COLORS['info']}ассистенты:{COLORS['reset']} "
-          f"{COLORS['accent3']}{', '.join(f'#{a}' for a in assistants) or '—'}{COLORS['reset']}")
+    print(f"  {COLORS['accent2']}→{COLORS['reset']} {COLORS['info']}аккаунт:{COLORS['reset']} "
+          f"{COLORS['accent4']}{bot.me.username or bot.me.first_name or bot.me.id}{COLORS['reset']} "
+          f"{COLORS['accent2']}(#{bot.me.id}){COLORS['reset']}")
     print(f"  {COLORS['accent2']}→{COLORS['reset']} {COLORS['info']}управление — командами в Telegram, список: .help{COLORS['reset']}")
     print(f"  {COLORS['accent2']}→{COLORS['reset']} {COLORS['info']}Ctrl+C — остановить бота{COLORS['reset']}")
     print()
 
-    await bot.autostart_accounts()
-
     try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
+        await bot.run()
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
-        for num in list(bot.running):
-            await bot.stop_account(num)
+        await bot.stop()
 
 
 if __name__ == "__main__":

@@ -1,42 +1,32 @@
-"""Реестр команд.
+"""Реестр команд для одного аккаунта.
 
 Каждая команда описывается регуляркой и функцией-обработчиком:
 
-    @command(r'^\\.ping$', name="ping", scope="local")
+    @command(r'^\\.ping$', name="ping")
     async def ping_handler(event, client, state):
         ...
 
-`scope`:
-    local  — выполняется на аккаунте, который поймал команду;
-    remote — по умолчанию уходит ассистентам;
-    auto   — ассистентам, если они есть, иначе локально.
-
 `@background` помечает функцию, которая вешает свои слушатели на клиент
-(автосохранение медиа, мьюты, анимация и т.п.). Такие слушатели вешаются
-только на главные и самостоятельные аккаунты — ассистенты остаются
-чистыми исполнителями.
+(автосохранение медиа, мьюты, анимация и т.п.).
 """
 
 import re
 
-SCOPES = ("local", "remote", "auto")
-
 
 class Command:
-    __slots__ = ("name", "pattern", "handler", "scope", "description")
+    __slots__ = ("name", "pattern", "handler", "description")
 
-    def __init__(self, name, pattern, handler, scope="auto", description=""):
+    def __init__(self, name, pattern, handler, description=""):
         self.name = name
         self.pattern = pattern
         self.handler = handler
-        self.scope = scope
         self.description = description
 
     def match(self, text):
         return self.pattern.match(text)
 
     def __repr__(self):
-        return f"<Command {self.name} scope={self.scope}>"
+        return f"<Command {self.name}>"
 
 
 COMMANDS = []
@@ -44,17 +34,14 @@ _BY_NAME = {}
 BACKGROUND = []
 
 
-def command(pattern, name=None, scope="auto", description=""):
-    if scope not in SCOPES:
-        raise ValueError(f"неизвестный scope: {scope}")
-
+def command(pattern, name=None, description=""):
     compiled = re.compile(pattern, re.IGNORECASE)
 
     def decorator(fn):
         cmd_name = (name or fn.__name__.removesuffix("_handler")).lower()
         if cmd_name in _BY_NAME:
             raise ValueError(f"команда .{cmd_name} уже зарегистрирована")
-        cmd = Command(cmd_name, compiled, fn, scope=scope, description=description)
+        cmd = Command(cmd_name, compiled, fn, description=description)
         COMMANDS.append(cmd)
         _BY_NAME[cmd_name] = cmd
         return fn

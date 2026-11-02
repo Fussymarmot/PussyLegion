@@ -160,7 +160,7 @@ async def cache_message_handler(event):
         pass
 
 
-@command(r'^\.save$', name="save", scope="local")
+@command(r'^\.save$', name="save")
 async def manual_save(event, client, state):
     try:
         await event.delete()
@@ -205,7 +205,7 @@ async def manual_save(event, client, state):
         exception("manual_save")
 
 
-@command(r'^\.clone(?:\s+(.+))?$', name="clone", scope="local")
+@command(r'^\.clone(?:\s+(.+))?$', name="clone")
 async def clone_handler(event, client, state):
     post_link = event.pattern_match.group(1)
     if not post_link:
@@ -224,15 +224,15 @@ async def clone_handler(event, client, state):
             await safe_edit(event, fmt("ошибка", ["пост не найден"]))
             return
         if message.media:
-            await client.send_file("me", message.media, caption=message.text or "")
+            await client.send_file(event.chat_id, message.media, caption=message.text or "")
         else:
-            await client.send_message("me", message.text or "пустой пост")
-        await safe_edit(event, fmt("клонирование выполнено", ["сохранено в избранное"]))
+            await client.send_message(event.chat_id, message.text or "пустой пост")
+        await safe_edit(event, fmt("клонирование выполнено", ["отправлено в чат"]))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
 
-@command(r'^\.qr(?:\s+(.+))?$', name="qr", scope="local")
+@command(r'^\.qr(?:\s+(.+))?$', name="qr")
 async def qr_handler(event, client, state):
     text = event.pattern_match.group(1)
     if not text:
