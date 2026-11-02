@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from datetime import datetime
 import pytz
@@ -6,6 +7,12 @@ from telethon import events
 from telethon.errors import MessageNotModifiedError
 from commands import background, command
 from logger import exception
+
+LINK_HOST_RE = re.compile(
+    r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/',
+    re.IGNORECASE,
+)
+USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,32}$')
 
 
 def fmt(title, rows=None):
@@ -34,7 +41,9 @@ async def resolve_peer(client, chat_id=None, username=None):
     2. если есть юзернейм (паблик-чат или человек с открытым
        @username) — резолвим по нему, это работает для ЛЮБОГО
        аккаунта независимо от членства/переписки;
-    3. иначе — нет доступа, сообщаем явно вместо тихого падения или
+    3. если id не закэширован, но аккаунт в чате состоит — подтягиваем
+       список диалогов, чтобы Telethon увидел access_hash;
+    4. иначе — нет доступа, сообщаем явно вместо тихого падения или
        неожиданного traceback.
 
     chat_id можно не передавать (None), если резолвить нужно только
@@ -44,13 +53,95 @@ async def resolve_peer(client, chat_id=None, username=None):
     if chat_id is not None:
         try:
             return await client.get_input_entity(chat_id)
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
     if username:
-        return await client.get_entity(username)
+        try:
+            return await client.get_input_entity(username)
+        except (ValueError, TypeError):
+            return await client.get_entity(username)
+
+    if chat_id is not None:
+        try:
+            return await client.get_entity(chat_id)
+        except (ValueError, TypeError):
+            pass
+
+        # аккаунт может состоять в чате, но его сессия ещё не видела
+        # этот диалог (свежий вход/переподключение) — список диалогов
+        # заполняет кэш сущностей, после чего id резолвится
+        try:
+            await client.get_dialogs(limit=200)
+            return await client.get_input_entity(chat_id)
+        except (ValueError, TypeError):
+            pass
 
     raise ValueError("нет доступа к чату — аккаунт не состоит в нём и нет публичной ссылки")
+
+
+def parse_message_link(text):
+    """Разбирает ссылку на сообщение Telegram.
+
+    Возвращает `(username, msg_id, peer_id)`:
+      * публичная ссылка `t.me/name/123` → (name, 123, None);
+      * приватная `t.me/c/123/456` → (None, 456, -100123);
+      * тема/ветка `t.me/name/45/123` → (name, 123, None);
+      * веб-превью `t.me/s/name/123` и `tg://privatepost` — тоже.
+
+    Если это не ссылка на сообщение (или ссылка на инвайт), все три
+    значения будут None.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None, None, None
+
+    private = re.search(
+        r'tg://privatepost\?[^\s#]*channel=(\d+)[^\s#]*post=(\d+)',
+        text,
+        re.IGNORECASE,
+    )
+    if private:
+        return None, int(private.group(2)), int("-100" + private.group(1))
+
+    match = LINK_HOST_RE.search(text)
+    if not match:
+        return None, None, None
+
+    path = text[match.end():].split("?")[0].split("#")[0].strip("/")
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return None, None, None
+
+    # web-превью канала: t.me/s/name/123
+    if parts[0].lower() == "s" and len(parts) > 1:
+        parts = parts[1:]
+
+    # приватная ссылка: t.me/c/<внутренний id>/[тема/]<msg_id>
+    if parts[0].lower() == "c" and len(parts) >= 3:
+        internal, tail = parts[1], parts[2:]
+        if internal.isdigit() and tail and all(p.isdigit() for p in tail):
+            return None, int(tail[-1]), int("-100" + internal)
+        return None, None, None
+
+    # публичная ссылка: t.me/name/[тема/]<msg_id>
+    if len(parts) >= 2 and USERNAME_RE.match(parts[0]) and parts[-1].isdigit():
+        return parts[0], int(parts[-1]), None
+
+    return None, None, None
+
+
+async def touch_message(client, peer, msg_id):
+    """Best-effort подтягивает сообщение в сессию клиента.
+
+    Нужно только как помощь перед повтором запроса: у свежего сообщения
+    сессия аккаунта иногда ещё не знает его, и Telegram отвечает
+    MESSAGE_ID_INVALID. Сама по себе проверка ничего не блокирует.
+    """
+    try:
+        return await client.get_messages(peer, ids=msg_id)
+    except Exception:
+        return None
 
 
 def username_of(entity):
@@ -168,7 +259,7 @@ COMMAND_INFO = {
     },
     "vote": {
         "description": "Голосует в опросе со всех запущенных аккаунтов. Без номера — покажет варианты.",
-        "syntax": "`.vote` [номер] / `.vote` [1,3] — для multiple-choice",
+        "syntax": "`.vote` [номер] / `.vote` [1,3] / `.vote` [ссылка] [номер]",
         "example": "`.vote 2`",
     },
     "qr": {

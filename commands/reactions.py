@@ -1,27 +1,45 @@
 """Массовая постановка реакций со всех запущенных аккаунтов."""
 
 import asyncio
-import re
 
+from telethon.errors import MessageIdInvalidError
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer, username_of
+from commands.utils import (
+    fmt, safe_edit, get_usage_instructions, resolve_peer, username_of,
+    parse_message_link, touch_message,
+)
 
 DEFAULT_EMOJI = "❤️"
 DELAY = 0.4  # между аккаунтами, чтобы не словить флуд-вейт сразу у всех
 
-LINK_RE = re.compile(r'(?:https?://)?t\.me/([A-Za-z0-9_]{5,32})/(\d+)(?:/(\d+))?')
+
+def _reaction_request(peer, msg_id, emoji):
+    return SendReactionRequest(
+        peer=peer,
+        msg_id=msg_id,
+        reaction=[ReactionEmoji(emoticon=emoji)],
+        add_to_recent=True,
+    )
 
 
-def _parse_link(text):
-    m = LINK_RE.search(text or "")
-    if not m:
-        return None, None
-    username = m.group(1)
-    msg_id = int(m.group(3) or m.group(2))
-    return username, msg_id
+async def _send_reaction(acc_client, peer, msg_id, emoji):
+    """Ставит реакцию; на MESSAGE_ID_INVALID делает один повтор.
+
+    Свежее сообщение иногда ещё не разошлось по сессиям аккаунтов —
+    первый запрос Telegram может отклонить. Подтягиваем сообщение
+    через get_messages и повторяем, вместо того чтобы заранее
+    отказываться от аккаунта.
+    """
+    try:
+        await acc_client(_reaction_request(peer, msg_id, emoji))
+        return
+    except MessageIdInvalidError:
+        await touch_message(acc_client, peer, msg_id)
+        await asyncio.sleep(0.5)
+        await acc_client(_reaction_request(peer, msg_id, emoji))
 
 
 @command(r'^\.like(?:\s+(\S+))?(?:\s+(\S+))?$', name="like", scope="local")
@@ -38,11 +56,12 @@ async def like_handler(event, client, state):
     arg1 = event.pattern_match.group(1)
     arg2 = event.pattern_match.group(2)
 
-    username, msg_id, emoji = None, None, DEFAULT_EMOJI
+    username, msg_id, peer_id = None, None, None
+    emoji = DEFAULT_EMOJI
     same_chat = True  # сообщение в том же чате, где написана команда, или в другом (по ссылке)
 
-    if arg1 and "t.me/" in arg1:
-        username, msg_id = _parse_link(arg1)
+    if arg1 and any(host in arg1 for host in ("t.me/", "telegram.me/", "tg://")):
+        username, msg_id, peer_id = parse_message_link(arg1)
         if not msg_id:
             await safe_edit(event, fmt("ошибка", ["не распознал ссылку на сообщение"]))
             return
@@ -74,23 +93,12 @@ async def like_handler(event, client, state):
     for num, acc_client in list(bot.clients.items()):
         label = bot.router.label(num)
         try:
-            peer = await resolve_peer(acc_client, event.chat_id if same_chat else None, username)
-
-            # та же защита, что и в .vote: свежее сообщение иногда не
-            # резолвится в sendReaction (MESSAGE_ID_INVALID), пока сессия
-            # явно его не подтянет через get_messages
-            target = await acc_client.get_messages(peer, ids=msg_id)
-            if target is None:
-                rows.append(f"{label} — сообщение не видно этому аккаунту")
-                await asyncio.sleep(DELAY)
-                continue
-
-            await acc_client(SendReactionRequest(
-                peer=peer,
-                msg_id=msg_id,
-                reaction=[ReactionEmoji(emoticon=emoji)],
-                add_to_recent=True,
-            ))
+            peer = await resolve_peer(
+                acc_client,
+                event.chat_id if same_chat else peer_id,
+                username,
+            )
+            await _send_reaction(acc_client, peer, msg_id, emoji)
             rows.append(f"{label} — ok")
             ok += 1
         except Exception as e:

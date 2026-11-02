@@ -3,12 +3,15 @@
 import asyncio
 import re
 
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, MessageIdInvalidError
 from telethon.tl.functions.messages import SendVoteRequest
 from telethon.tl.types import MessageMediaPoll
 
 from commands import command
-from commands.utils import fmt, safe_edit, get_usage_instructions, resolve_peer, username_of
+from commands.utils import (
+    fmt, safe_edit, get_usage_instructions, resolve_peer, username_of,
+    parse_message_link, touch_message,
+)
 
 DELAY = 0.5
 
@@ -18,25 +21,69 @@ def _text(obj):
     return getattr(obj, "text", obj)
 
 
-@command(r'^\.vote(?:\s+(\S+))?$', name="vote", scope="local")
+def _vote_request(peer, msg_id, options):
+    return SendVoteRequest(peer=peer, msg_id=msg_id, options=options)
+
+
+async def _send_vote(acc_client, peer, msg_id, options):
+    """Голосует; на MESSAGE_ID_INVALID делает один повтор.
+
+    У только что отправленного опроса сессия аккаунта иногда ещё не
+    знает сообщение. Подтягиваем его через get_messages и повторяем,
+    вместо того чтобы заранее списывать аккаунт со счетов.
+    """
+    try:
+        await acc_client(_vote_request(peer, msg_id, options))
+        return
+    except MessageIdInvalidError:
+        await touch_message(acc_client, peer, msg_id)
+        await asyncio.sleep(0.5)
+        await acc_client(_vote_request(peer, msg_id, options))
+
+
+@command(r'^\.vote(?:\s+(\S+))?(?:\s+(\S+))?$', name="vote", scope="local")
 async def vote_handler(event, client, state):
     """.vote — ответом на опрос без номера: показывает варианты и их номера.
     .vote 2 — голосует за вариант №2 со всех запущенных аккаунтов.
     .vote 1,3 — несколько вариантов (для multiple-choice опросов).
+    .vote <ссылка> — то же самое, но опрос задан ссылкой на сообщение.
     """
     bot = state.bot
-    arg = event.pattern_match.group(1)
+    arg1 = event.pattern_match.group(1)
+    arg2 = event.pattern_match.group(2)
 
-    if not event.is_reply:
-        await safe_edit(event, get_usage_instructions("vote"))
+    username, msg_id, peer_id = None, None, None
+    same_chat = True
+
+    if arg1 and any(host in arg1 for host in ("t.me/", "telegram.me/", "tg://")):
+        username, msg_id, peer_id = parse_message_link(arg1)
+        if not msg_id:
+            await safe_edit(event, fmt("ошибка", ["не распознал ссылку на сообщение"]))
+            return
+        arg = arg2
+        same_chat = False
+        try:
+            target_peer = await resolve_peer(client, peer_id, username)
+            message = await client.get_messages(target_peer, ids=msg_id)
+        except Exception as e:
+            await safe_edit(event, fmt("ошибка", [f"не открыл сообщение по ссылке — `{str(e)[:90]}`"]))
+            return
+    else:
+        arg = arg1
+        if not event.is_reply:
+            await safe_edit(event, get_usage_instructions("vote"))
+            return
+        message = await event.get_reply_message()
+        if message:
+            chat = await event.get_chat()
+            username = username_of(chat)
+            msg_id = message.id
+
+    if not message or not isinstance(message.media, MessageMediaPoll):
+        await safe_edit(event, fmt("ошибка", ["ответь на сообщение с опросом или дай ссылку на него"]))
         return
 
-    reply = await event.get_reply_message()
-    if not reply or not isinstance(reply.media, MessageMediaPoll):
-        await safe_edit(event, fmt("ошибка", ["ответь на сообщение с опросом"]))
-        return
-
-    poll = reply.media.poll
+    poll = message.media.poll
     answers = poll.answers
 
     if not arg:
@@ -67,9 +114,9 @@ async def vote_handler(event, client, state):
 
     options = [answers[i - 1].option for i in indices]
 
-    chat = await event.get_chat()
-    username = username_of(chat)
-    msg_id = reply.id
+    if not bot.clients:
+        await safe_edit(event, fmt("ошибка", ["нет запущенных аккаунтов"]))
+        return
 
     await safe_edit(event, fmt("голосую", [f"вариант(ы) — `{', '.join(map(str, indices))}`"]))
 
@@ -78,20 +125,12 @@ async def vote_handler(event, client, state):
     for num, acc_client in list(bot.clients.items()):
         label = bot.router.label(num)
         try:
-            peer = await resolve_peer(acc_client, event.chat_id, username)
-
-            # даже у реального участника чата sendVote иногда отвечает
-            # MESSAGE_ID_INVALID на свежее сообщение, если сессия этого
-            # аккаунта ещё не синхронизировала его саму — явный get_messages
-            # догоняет состояние перед голосованием и заодно подтверждает,
-            # что сообщение этому аккаунту вообще видно
-            target = await acc_client.get_messages(peer, ids=msg_id)
-            if target is None:
-                rows.append(f"{label} — сообщение не видно этому аккаунту")
-                await asyncio.sleep(DELAY)
-                continue
-
-            await acc_client(SendVoteRequest(peer=peer, msg_id=msg_id, options=options))
+            peer = await resolve_peer(
+                acc_client,
+                event.chat_id if same_chat else peer_id,
+                username,
+            )
+            await _send_vote(acc_client, peer, msg_id, options)
             rows.append(f"{label} — ok")
             ok += 1
         except FloodWaitError as e:
