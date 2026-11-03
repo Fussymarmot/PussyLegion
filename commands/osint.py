@@ -597,15 +597,27 @@ async def mosint_handler(event, client, state):
         ]))
         return
 
+    # не полагаемся на то, что mosint сам правильно определит $HOME внутри
+    # процесса бота (там он может отличаться от интерактивного шелла или
+    # вообще быть не задан, из-за чего mosint падает с паникой ещё до
+    # вывода чеклиста) — считаем путь сами и передаём его явно через -c.
+    mosint_config = Path.home() / ".mosint.yaml"
+    if not mosint_config.is_file():
+        await safe_edit(event, fmt("ошибка", [
+            f"нет конфига `{mosint_config}`",
+            "создай хотя бы с пустыми ключами (см. example-config.yaml в репозитории mosint)",
+        ]))
+        return
+
     with tempfile.TemporaryDirectory() as tmp:
         out_path = Path(tmp) / "mosint.json"
         try:
-            # v3: `mosint <email> -o файл.json -s` (не -j — это флаг из
-            # другой версии/форка). -s — silent, чтобы не ловить ANSI-мусор
-            # в stdout. Важно: mosint требует конфиг ~/.mosint.yaml (хотя
-            # бы пустой) — без него может упасть ещё до записи файла.
+            # v3: `mosint <email> -o файл.json -s -c конфиг`. -o — файл
+            # вывода (не -j — это флаг из другой версии/форка). -s —
+            # silent, чтобы не ловить ANSI-мусор в stdout. -c — явный путь
+            # к конфигу, см. комментарий выше про $HOME.
             result = subprocess.run(
-                [exe, mail, "-o", str(out_path), "-s"],
+                [exe, mail, "-o", str(out_path), "-s", "-c", str(mosint_config)],
                 capture_output=True, text=True, shell=False, timeout=180,
             )
         except subprocess.TimeoutExpired:
@@ -621,11 +633,14 @@ async def mosint_handler(event, client, state):
             # собой реальную ошибку, если она вся ушла в stderr
             err = (result.stderr or "").strip()
             out = (result.stdout or "").strip()
-            tail = (err or out)[-800:]
+            raw = err or out
+            # для паник важно начало ("panic: ..."), не хвост стектрейса —
+            # поэтому голова + немного хвоста, а не просто [-800:]
+            head = (raw[:900] + " …") if len(raw) > 900 else raw
             rows = [f"`{mail}`", f"не нашёл json-отчёт (код возврата `{result.returncode}`)"]
-            if "mosint.yaml" in tail or "config" in tail.lower():
+            if "mosint.yaml" in raw or "config" in raw.lower():
                 rows.append("похоже, нет конфига — создай хотя бы пустой `~/.mosint.yaml`")
-            rows.append(f"{'stderr' if err else 'stdout'}:\n```\n{tail}\n```")
+            rows.append(f"{'stderr' if err else 'stdout'}:\n```\n{head}\n```")
             await safe_edit(event, fmt("mosint", rows))
             return
 
@@ -708,11 +723,12 @@ async def h8mail_handler(event, client, state):
         if not out_path.is_file():
             err = (result.stderr or "").strip()
             out = (result.stdout or "").strip()
-            tail = (err or out)[-800:]
+            raw = err or out
+            head = (raw[:900] + " …") if len(raw) > 900 else raw
             await safe_edit(event, fmt("h8mail", [
                 f"`{mail}`",
                 f"не нашёл json-отчёт (код возврата `{result.returncode}`)",
-                f"{'stderr' if err else 'stdout'}:\n```\n{tail}\n```",
+                f"{'stderr' if err else 'stdout'}:\n```\n{head}\n```",
             ]))
             return
 
