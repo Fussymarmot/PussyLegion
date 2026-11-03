@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -597,11 +598,18 @@ async def mosint_handler(event, client, state):
         ]))
         return
 
-    # не полагаемся на то, что mosint сам правильно определит $HOME внутри
-    # процесса бота (там он может отличаться от интерактивного шелла или
-    # вообще быть не задан, из-за чего mosint падает с паникой ещё до
-    # вывода чеклиста) — считаем путь сами и передаём его явно через -c.
-    mosint_config = Path.home() / ".mosint.yaml"
+    # Можно явно задать путь в окружении сервиса через MOSINT_CONFIG.
+    # Если переменная не задана, сначала ищем конфиг в HOME процесса,
+    # затем — в /home/fussy (частый случай, когда бот запущен через sudo
+    # или systemd от root, а конфиг создан интерактивным пользователем).
+    configured_path = os.environ.get("MOSINT_CONFIG")
+    if configured_path:
+        mosint_config = Path(configured_path).expanduser()
+    else:
+        home_config = Path.home() / ".mosint.yaml"
+        user_config = Path("/home/fussy/.mosint.yaml")
+        mosint_config = home_config if home_config.is_file() else user_config
+
     if not mosint_config.is_file():
         await safe_edit(event, fmt("ошибка", [
             f"нет конфига `{mosint_config}`",
