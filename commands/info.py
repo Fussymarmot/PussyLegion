@@ -12,7 +12,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 async def bot_info_handler(event, client, state):
     await safe_edit(event, fmt("pussylegion", [
         f"версия — `{VERSION}`",
-        "разработчик — @therudix",
+        "разработчик — @pussymamont",
         f"канал — {CHANNEL}",
         "лицензия — MIT",
         f"время — `{get_moscow_time()}`",
