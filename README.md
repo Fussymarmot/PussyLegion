@@ -1,7 +1,5 @@
 <div align="center">
 
-  <img src="https://i.ibb.co/v08LpSt/IMG-20260409-190254-955.jpg" width="150" alt="PussyLegion Logo" style="border-radius: 18px;" />
-
   <h1 align="center" style="font-style: italic; color: #ff4500;">PussyLegion</h1>
 
   <p align="center">
