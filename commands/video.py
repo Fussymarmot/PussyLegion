@@ -10,7 +10,9 @@ from telethon.tl.types import DocumentAttributeVideo
 
 from commands import command
 from commands.utils import fmt, safe_edit, get_usage_instructions
-from config import TEMP_DIR
+from config import (
+    TEMP_DIR, PROXY_ENABLED, PROXY_TYPE, PROXY_HOST, PROXY_PORT, PROXY_USER, PROXY_PASS,
+)
 from logger import exception
 
 try:
@@ -37,6 +39,25 @@ def _host_ok(url):
     return any(host == h or host.endswith("." + h) for h in _ALLOWED_HOSTS)
 
 
+def _proxy_url():
+    """Прокси из .env в формате yt-dlp (mtproto для скачивания не годится)."""
+    if not PROXY_ENABLED or PROXY_TYPE not in ("socks5", "http", "https"):
+        return None
+    scheme = "socks5h" if PROXY_TYPE == "socks5" else "http"
+    auth = f"{PROXY_USER}:{PROXY_PASS}@" if PROXY_USER else ""
+    return f"{scheme}://{auth}{PROXY_HOST}:{PROXY_PORT}"
+
+
+def _impersonate_target():
+    """Маскировка под Chrome (нужна TikTok'у); работает, если стоит curl_cffi."""
+    try:
+        import curl_cffi  # noqa: F401
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        return ImpersonateTarget("chrome")
+    except Exception:
+        return None
+
+
 def _ydl_opts(workdir, has_ffmpeg):
     if has_ffmpeg:
         fmt_sel = (
@@ -60,6 +81,12 @@ def _ydl_opts(workdir, has_ffmpeg):
     }
     if has_ffmpeg:
         opts["merge_output_format"] = "mp4"
+    proxy = _proxy_url()
+    if proxy:
+        opts["proxy"] = proxy
+    target = _impersonate_target()
+    if target:
+        opts["impersonate"] = target
     return opts
 
 
