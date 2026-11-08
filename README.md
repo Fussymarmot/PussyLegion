@@ -146,15 +146,3 @@ python hurobot.py
 </div>
 
 <br>
-
-### <img src="https://api.iconify.design/ph:heart-duotone.svg?color=%23ff4500" width="22" align="top"> Поддержка
-
-Официальный канал: [@hurodev](https://t.me/hurodev)
-
-<br>
-
-<div align="left">
-  <a href="https://t.me/hurodev">
-    <img src="https://img.shields.io/badge/Telegram-@hurodev-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram"/>
-  </a>
-</div>
