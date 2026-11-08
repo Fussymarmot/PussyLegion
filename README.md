@@ -10,13 +10,6 @@
 
   <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=600&size=20&duration=3000&pause=1000&color=FF4500&center=true&vCenter=true&width=700&lines=Single-Account+Userbot;Media+Save+%2B+Auto-Archive;OSINT+Toolkit;Spam+%2B+Utilities;Termux+Ready" alt="Typing SVG" />
 
-  <br>
-
-  <img src="https://img.shields.io/badge/PussyLegion-v1.4.0-ff4500?style=for-the-badge" alt="Version"/>
-  <a href="https://t.me/hurodev">
-    <img src="https://img.shields.io/badge/Telegram-@hurodev-26A5E4?style=for-the-badge&color=ff4500&logo=telegram&logoColor=white" alt="Telegram"/>
-  </a>
-
 </div>
 
 <br>
