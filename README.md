@@ -43,6 +43,16 @@ pip install -r requirements.txt
 python hurobot.py
 ```
 
+**Внешние программы** (не ставятся через `pip`):
+
+| Программа | Для чего | Установка |
+|---|---|---|
+| `ffmpeg` | `.video` — склейка видео и звука, качество выше | Debian/Ubuntu: `sudo apt install ffmpeg`, Termux: `pkg install ffmpeg` |
+| `mosint` | `.mosint` — отчёт по почте. Go-бинарь | `go install github.com/alpkeskin/mosint/v3/cmd/mosint@latest` (нужен [Go](https://go.dev/dl/), бинарь появится в `~/go/bin` — добавь его в `PATH`) |
+
+Без `ffmpeg` `.video` работает, но берёт готовый файл в меньшем качестве.
+Без `mosint` не работает только `.mosint`, остальное — как обычно.
+
 При первом запуске бот попросит в консоли номер телефона, код и пароль 2FA —
 сессия сохранится в `PussyLegion_data/sessions/main.session`. Свои `API_ID` /
 `API_HASH` берутся на [my.telegram.org](https://my.telegram.org) и кладутся
@@ -137,3 +147,4 @@ python hurobot.py
 </div>
 
 <br>
+
