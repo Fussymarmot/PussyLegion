@@ -61,6 +61,11 @@ COMMAND_INFO = {
         "syntax": "`.clone` [url]",
         "example": "`.clone https://t.me/channel/123`",
     },
+    "video": {
+        "description": "Скачивает видео с YouTube или TikTok, отправляет в этот чат и удаляет файл с устройства. Ссылку можно дать ответом на сообщение.",
+        "syntax": "`.video` [ссылка]",
+        "example": "`.video https://youtu.be/dQw4w9WgXcQ`",
+    },
     "logs": {
         "description": "Присылает последние строки лога в избранное.",
         "syntax": "`.logs` [число строк]",
