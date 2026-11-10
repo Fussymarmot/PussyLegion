@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from telethon import events, Button
 from commands import background, command
@@ -182,23 +183,31 @@ async def tagall_handler(event, client, state):
         mentions = [mention_markdown(p) for p in candidates]
 
         # Telegram ограничивает число entities в сообщении (~100) и длину —
-        # берём упоминания целиком, не разрезая их посередине
-        chunk, length = [], 0
+        # режем упоминания на части, не разрезая их посередине
+        chunks, chunk, length = [], [], 0
         for m in mentions:
-            if len(chunk) >= 90 or length + len(m) + 1 > 3500:
-                break
+            if chunk and (len(chunk) >= 90 or length + len(m) + 1 > 3500):
+                chunks.append(chunk)
+                chunk, length = [], 0
             chunk.append(m)
             length += len(m) + 1
+        if chunk:
+            chunks.append(chunk)
 
         # Telegram не рассылает уведомления об упоминаниях при РЕДАКТИРОВАНИИ
-        # сообщения, поэтому правим не команду, а отправляем новое сообщение
+        # сообщения, поэтому правим не команду, а отправляем новые сообщения
         # и удаляем исходное с командой.
-        await client.send_message(
-            event.chat_id,
-            fmt("упоминание", [" ".join(chunk)]),
-            parse_mode="md",
-            reply_to=event.reply_to_msg_id,
-        )
+        total = len(chunks)
+        for i, part in enumerate(chunks, 1):
+            title = "упоминание" if total == 1 else f"упоминание {i}/{total}"
+            await client.send_message(
+                event.chat_id,
+                fmt(title, [" ".join(part)]),
+                parse_mode="md",
+                reply_to=event.reply_to_msg_id if i == 1 else None,
+            )
+            if i < total:
+                await asyncio.sleep(0.7)  # не ловить флуд-лимит
         try:
             await event.delete()
         except Exception:

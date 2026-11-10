@@ -1,4 +1,5 @@
 import re
+import copy
 import asyncio
 import threading
 import time
@@ -15,7 +16,47 @@ except ImportError:
     UserAgent = None
 
 
-@command(r'^\.spam(?:\s+(\d+)\s+(.+))?$', name="spam")
+def _utf16_len(text):
+    """Длина строки в UTF-16 code units — в них Telegram считает offset/length."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def extract_entities(event, group=2):
+    """Достаёт форматирование (в т.ч. премиум-эмодзи) для части сообщения,
+    попавшей в группу `group` регулярки команды.
+
+    Текст аргумента берётся из регулярки и теряет entities, поэтому без этого
+    премиум-эмодзи превращаются в обычные. Здесь offset'ы сдвигаются так,
+    чтобы они указывали на позиции внутри самого аргумента.
+    """
+    message = event.message
+    entities = getattr(message, "entities", None)
+    match = event.pattern_match
+    if not entities or match is None or match.start(group) < 0:
+        return []
+
+    raw = message.raw_text or ""
+    # диспетчер матчит регулярку по text.strip(), учтём срезанные пробелы
+    lead = len(raw) - len(raw.lstrip())
+    arg = match.group(group)
+    start = _utf16_len(raw[:lead + match.start(group)])
+    length = _utf16_len(arg)
+
+    result = []
+    for ent in entities:
+        ent_start = ent.offset - start
+        ent_end = ent_start + ent.length
+        if ent_end <= 0 or ent_start >= length:
+            continue  # относится к самой команде или к тексту за пределами
+        new = copy.copy(ent)
+        new.offset = max(ent_start, 0)
+        new.length = min(ent_end, length) - new.offset
+        if new.length > 0:
+            result.append(new)
+    return result
+
+
+@command(r'(?s)^\.spam(?:\s+(\d+)\s+(.+))?$', name="spam")
 async def spam_handler(event, client, state):
     args = event.pattern_match.groups()
     if not args or not args[0] or not args[1]:
@@ -28,6 +69,9 @@ async def spam_handler(event, client, state):
         await safe_edit(event, fmt("ошибка", ["максимум 250"]))
         return
 
+    # форматирование (премиум-эмодзи и т.п.) нужно снять до удаления команды
+    entities = extract_entities(event, group=2)
+
     # удаляем команду до рассылки, чтобы она не попала в счётчик и не
     # висела в чате; чат известен из самого события
     try:
@@ -36,7 +80,13 @@ async def spam_handler(event, client, state):
         pass
 
     for _ in range(count):
-        await client.send_message(event.chat_id, message)
+        # с formatting_entities Telethon не парсит текст заново и отправляет
+        # entities как есть — премиум-эмодзи остаются премиум-эмодзи
+        await client.send_message(
+            event.chat_id,
+            message,
+            formatting_entities=entities or None,
+        )
         await asyncio.sleep(0.5)
 
 

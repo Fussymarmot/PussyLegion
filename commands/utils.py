@@ -212,9 +212,67 @@ def get_usage_instructions(name, status=None):
     return fmt(name, rows)
 
 
+# Telegram: до 4096 символов и ~100 entities (жирный, код, ссылки) на сообщение.
+# Берём запас — разметка в тексте длиннее, чем то, что считает Telegram.
+MAX_MSG_LEN = 4000
+MAX_MSG_ENTITIES = 90
+
+
+def _count_entities(text):
+    """Грубая оценка числа entities в markdown-тексте."""
+    return text.count("**") // 2 + text.count("`") // 2 + text.count("](")
+
+
+def split_message(text, limit=MAX_MSG_LEN, max_entities=MAX_MSG_ENTITIES):
+    """Режет длинный markdown-текст на части по границам строк.
+
+    Не разрывает блоки ``` посередине: если часть закончилась внутри блока
+    кода, он закрывается, а в следующей части открывается заново.
+    """
+    if len(text) <= limit and _count_entities(text) <= max_entities:
+        return [text]
+
+    piece_len = limit - 20  # запас под закрывающие ``` и перенос строки
+    chunks, cur, cur_len, cur_ent, in_fence = [], [], 0, 0, False
+
+    def flush():
+        nonlocal cur, cur_len, cur_ent
+        if in_fence:
+            cur.append("```")
+        chunks.append("\n".join(cur))
+        cur = ["```"] if in_fence else []
+        cur_len = sum(len(x) + 1 for x in cur)
+        cur_ent = sum(_count_entities(x) for x in cur)
+
+    for line in text.split("\n"):
+        # одну слишком длинную строку режем жёстко
+        pieces = [line[i:i + piece_len] for i in range(0, len(line), piece_len)] or [""]
+        for piece in pieces:
+            ent = _count_entities(piece)
+            if cur and (cur_len + len(piece) + 1 > piece_len or cur_ent + ent > max_entities):
+                flush()
+            cur.append(piece)
+            cur_len += len(piece) + 1
+            cur_ent += ent
+            if piece.count("```") % 2:
+                in_fence = not in_fence
+    if cur:
+        chunks.append("\n".join(cur))
+    return [c.strip("\n") for c in chunks if c.strip()]
+
+
 async def safe_edit(event, text, parse_mode="md", **kwargs):
+    """Правит сообщение с командой. Если текст не влезает в одно сообщение —
+    первая часть идёт в правку, остальные отправляются следом новыми."""
     try:
-        return await event.edit(text, parse_mode=parse_mode, **kwargs)
+        parts = split_message(text) if parse_mode == "md" else [text]
+        result = await event.edit(parts[0], parse_mode=parse_mode, **kwargs)
+        if len(parts) > 1:
+            client = getattr(event, "client", None)
+            for part in parts[1:]:
+                await asyncio.sleep(0.5)  # не ловить флуд-лимит
+                await client.send_message(event.chat_id, part, parse_mode=parse_mode)
+        return result
     except MessageNotModifiedError:
         pass
     except Exception as e:
