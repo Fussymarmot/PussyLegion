@@ -190,7 +190,19 @@ async def tagall_handler(event, client, state):
             chunk.append(m)
             length += len(m) + 1
 
-        await safe_edit(event, fmt("упоминание", [" ".join(chunk)]))
+        # Telegram не рассылает уведомления об упоминаниях при РЕДАКТИРОВАНИИ
+        # сообщения, поэтому правим не команду, а отправляем новое сообщение
+        # и удаляем исходное с командой.
+        await client.send_message(
+            event.chat_id,
+            fmt("упоминание", [" ".join(chunk)]),
+            parse_mode="md",
+            reply_to=event.reply_to_msg_id,
+        )
+        try:
+            await event.delete()
+        except Exception:
+            pass
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
