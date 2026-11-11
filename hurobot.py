@@ -11,10 +11,13 @@ from telethon import TelegramClient, events
 from telethon.errors import (
     PhoneNumberInvalidError,
     PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    FloodWaitError,
     SessionPasswordNeededError,
     PasswordHashInvalidError,
 )
 from telethon.errors.rpcerrorlist import TimedOutError
+from telethon.tl.functions.auth import ResendCodeRequest
 
 from config import (
     API_ID, API_HASH, VERSION, COLORS, SESSION_DIR, SESSION_PREFIX,
@@ -245,6 +248,23 @@ class HuroBot:
         success(f"аккаунт {name} (#{self.me.id}) запущен, обработчиков: {loaded}")
         return True
 
+    @staticmethod
+    def _report_code_type(sent):
+        """Говорит, куда Telegram реально отправил код."""
+        kind = sent.type.__class__.__name__
+        hints = {
+            "SentCodeTypeApp": "код пришёл В ПРИЛОЖЕНИЕ Telegram на другом устройстве, где ты уже вошёл (чат «Telegram»), а не по SMS. Если устройства нет — введи `sms`",
+            "SentCodeTypeSms": "код отправлен по SMS",
+            "SentCodeTypeCall": "код будет продиктован звонком",
+            "SentCodeTypeFlashCall": "код придёт как последние цифры входящего звонка",
+            "SentCodeTypeMissedCall": "код — последние цифры пропущенного звонка",
+            "SentCodeTypeEmailCode": "код отправлен на привязанную почту",
+        }
+        info(hints.get(kind, f"код отправлен ({kind})"))
+        nxt = sent.next_type.__class__.__name__ if getattr(sent, "next_type", None) else None
+        if nxt:
+            info(f"следующий способ при повторе: {nxt}")
+
     async def console_login(self):
         """Первый вход: номер, код, при необходимости пароль 2FA."""
         ask = lambda prompt: asyncio.to_thread(input, prompt)
@@ -259,9 +279,13 @@ class HuroBot:
                 continue
             try:
                 sent = await self.client.send_code_request(phone)
+                self._report_code_type(sent)
                 break
             except PhoneNumberInvalidError:
                 error("неверный номер")
+            except FloodWaitError as e:
+                error(f"Telegram временно блокирует запрос кода, подожди {e.seconds}с и запусти снова")
+                return False
             except Exception as e:
                 exception("console_login.send_code")
                 error(f"не удалось отправить код: {e}")
@@ -269,7 +293,17 @@ class HuroBot:
         need_password = False
         while True:
             if not need_password:
-                code = "".join(ch for ch in (await ask("код из Telegram: ")) if ch.isdigit())
+                answer = (await ask("код из Telegram (или `sms` — выслать повторно): ")).strip()
+                if answer.lower() in ("sms", "смс", "resend", "r"):
+                    try:
+                        sent = await self.client(ResendCodeRequest(phone, sent.phone_code_hash))
+                        self._report_code_type(sent)
+                    except Exception as e:
+                        error(f"не удалось запросить код повторно: {e}")
+                    continue
+                code = "".join(ch for ch in answer if ch.isdigit())
+                if not code:
+                    continue
                 try:
                     await self.client.sign_in(phone, code=code, phone_code_hash=sent.phone_code_hash)
                     return True
@@ -278,6 +312,15 @@ class HuroBot:
                     continue
                 except PhoneCodeInvalidError:
                     error("неверный код")
+                    continue
+                except PhoneCodeExpiredError:
+                    error("код устарел — запрашиваю новый")
+                    try:
+                        sent = await self.client.send_code_request(phone)
+                        self._report_code_type(sent)
+                    except Exception as e:
+                        error(f"не удалось запросить код: {e}")
+                        return False
                     continue
                 except Exception as e:
                     exception("console_login.sign_in")
