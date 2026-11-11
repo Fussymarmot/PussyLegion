@@ -265,12 +265,59 @@ class HuroBot:
         if nxt:
             info(f"следующий способ при повторе: {nxt}")
 
+    async def _qr_login(self):
+        """Вход по QR: Настройки → Устройства → Подключить устройство."""
+        import qrcode
+
+        while True:
+            try:
+                qr = await self.client.qr_login()
+            except Exception as e:
+                exception("console_login.qr")
+                error(f"не удалось создать QR: {e}")
+                return False
+
+            code = qrcode.QRCode(border=1)
+            code.add_data(qr.url)
+            code.make()
+            print()
+            info("Telegram на телефоне → Настройки → Устройства → Подключить устройство → сканируй QR")
+            code.print_ascii(invert=True)
+            info(f"QR живёт ~30 секунд и обновится сам. Ссылка: {qr.url}")
+
+            try:
+                await qr.wait(timeout=30)
+                return True
+            except asyncio.TimeoutError:
+                warning("QR устарел, создаю новый")
+                continue
+            except SessionPasswordNeededError:
+                break
+            except Exception as e:
+                exception("console_login.qr_wait")
+                error(f"не удалось войти по QR: {e}")
+                return False
+
+        while True:
+            password = await asyncio.to_thread(getpass.getpass, "пароль 2FA: ")
+            try:
+                await self.client.sign_in(password=password)
+                return True
+            except PasswordHashInvalidError:
+                error("неверный пароль")
+            except Exception as e:
+                exception("console_login.qr_password")
+                error(f"не удалось войти: {e}")
+                return False
+
     async def console_login(self):
         """Первый вход: номер, код, при необходимости пароль 2FA."""
         ask = lambda prompt: asyncio.to_thread(input, prompt)
 
         while True:
-            raw = (await ask("номер телефона (+79123456789): ")).strip()
+            raw = (await ask("номер телефона (+79123456789) или `qr` — вход по QR без кода: ")).strip()
+            if raw.lower() == "qr":
+                return await self._qr_login()
             phone = raw.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
             if not phone.startswith("+"):
                 phone = "+" + phone.lstrip("+")
