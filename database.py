@@ -1,6 +1,5 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 from config import DB_PATH
 from logger import log
 
@@ -53,42 +52,17 @@ def init_db():
             )
         """)
 
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS stats (
-                user_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                date TEXT NOT NULL,
-                msg_count INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, chat_id, date)
-            )
-        """)
+        # статистика не ведётся: таблица от старой реализации только
+        # занимала место
+        c.execute("DROP TABLE IF EXISTS stats")
+        c.execute("DROP TABLE IF EXISTS stats_old")
 
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS msg_cache (
-                user_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                msg_id INTEGER NOT NULL,
-                sender_id INTEGER,
-                sender_name TEXT,
-                text TEXT,
-                media_type TEXT,
-                date TEXT NOT NULL,
-                PRIMARY KEY (user_id, chat_id, msg_id)
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_cache_date ON msg_cache(date)")
+        # кэш удалённых сообщений живёт в памяти (commands/media.py);
+        # таблица от старой реализации только занимала место
+        c.execute("DROP TABLE IF EXISTS msg_cache")
 
         # таблицы старого мультиаккаунтного режима больше не используются
         c.execute("DROP TABLE IF EXISTS account_roles")
         c.execute("DROP TABLE IF EXISTS settings")
 
     log.info("База данных инициализирована")
-
-
-def cleanup_old_data(days=30):
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    with db() as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM msg_cache WHERE date < ?", (cutoff,))
-        c.execute("DELETE FROM stats WHERE date < ?", (cutoff[:10],))
-    log.info(f"Очищены данные старше {days} дней")

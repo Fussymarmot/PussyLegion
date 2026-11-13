@@ -5,9 +5,8 @@ import re
 import importlib
 import time
 from pathlib import Path
-from datetime import datetime, timezone
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.errors import (
     PhoneNumberInvalidError,
     PhoneCodeInvalidError,
@@ -26,7 +25,7 @@ from config import (
 )
 
 from logger import info, success, error, warning, exception, log
-from database import db, init_db, cleanup_old_data
+from database import db, init_db
 
 from commands import get_backgrounds
 from core.dispatcher import attach as attach_dispatcher
@@ -230,10 +229,6 @@ class HuroBot:
         self.state.owner_id = self.me.id
 
         attach_dispatcher(self.client, self.state)
-
-        @self.client.on(events.NewMessage(incoming=True))
-        async def _stats(event):
-            await stats_collector(event)
 
         loaded = 1
         for register_fn in get_backgrounds():
@@ -454,21 +449,6 @@ def make_client(session_path):
     return TelegramClient(session_path, API_ID, API_HASH, **kwargs)
 
 
-async def stats_collector(event):
-    try:
-        if not event.is_private:
-            return
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with db() as conn:
-            conn.execute(
-                """INSERT INTO stats (user_id, chat_id, date, msg_count) VALUES (?, ?, ?, 1)
-                   ON CONFLICT(user_id, chat_id, date) DO UPDATE SET msg_count = msg_count + 1""",
-                (event.sender_id, event.chat_id, today),
-            )
-    except Exception:
-        pass
-
-
 async def main():
     banner()
     print()
@@ -487,7 +467,6 @@ async def main():
     session_path = migrate_sessions()
 
     init_db()
-    cleanup_old_data(days=30)
 
     bot = HuroBot()
     if not await bot.start(session_path):

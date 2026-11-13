@@ -104,8 +104,9 @@ TEMP_DIR = DATA_ROOT / "temp"
 for d in (SESSION_DIR, LOG_DIR, DATA_DIR, CACHE_DIR, TEMP_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# сессии дают полный доступ к аккаунту — закрываем от других пользователей ОС
-for _d in (DATA_ROOT, SESSION_DIR):
+# сессии дают полный доступ к аккаунту, а в логах и базе могут оседать
+# тексты сообщений — закрываем всё это от других пользователей ОС
+for _d in (DATA_ROOT, SESSION_DIR, LOG_DIR, DATA_DIR, CACHE_DIR, TEMP_DIR):
     try:
         os.chmod(_d, 0o700)
     except Exception:

@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from telethon import events, Button
 from commands import background, command
+from config import TEMP_DIR
 from database import db
 from logger import exception
 from commands.utils import fmt, safe_edit, get_moscow_time, mention_markdown
@@ -255,18 +256,26 @@ async def iter_handler(event, client, state):
         if not participants:
             await safe_edit(event, fmt("ошибка", ["нет участников"]))
             return
-        path = f"members_{event.id}.txt"
-        with open(path, "w", encoding="utf-8") as f:
-            for p in participants:
-                if not only_phone or p.phone:
-                    f.write(f"{p.id} | @{p.username or 'нет'} | {p.phone or 'нет'}\n")
-        caption = fmt("экспорт участников", [
-            f"чат — {chat_link}",
-            f"время — `{get_moscow_time()}`",
-        ])
-        await client.send_file("me", path, caption=caption, parse_mode="md")
-        import os
-        os.remove(path)
+
+        path = TEMP_DIR / f"members_{event.id}.txt"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for p in participants:
+                    if not only_phone or p.phone:
+                        f.write(f"{p.id} | @{p.username or 'нет'} | {p.phone or 'нет'}\n")
+            caption = fmt("экспорт участников", [
+                f"чат — {chat_link}",
+                f"время — `{get_moscow_time()}`",
+            ])
+            await client.send_file("me", str(path), caption=caption, parse_mode="md")
+        finally:
+            # файл лежит во временной папке проекта и удаляется даже при
+            # ошибке отправки, чтобы не копить мусор
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         await safe_edit(event, fmt("экспорт выполнен", ["сохранено в избранное"]))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))

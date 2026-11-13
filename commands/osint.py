@@ -11,9 +11,12 @@ from pathlib import Path
 
 import requests
 import whois as whois_lib
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.messages import GetFullChatRequest
 from telethon.tl.functions.users import GetFullUserRequest
+from telethon.tl.types import Channel, Chat, User
 from commands import command
-from commands.utils import safe_edit, fmt, get_usage_instructions
+from commands.utils import safe_edit, fmt, get_usage_instructions, username_of
 from config import CACHE_DIR
 
 # кэш последнего прогона holehe по каждой почте — нужен для .osint <почта> -r
@@ -45,6 +48,149 @@ async def _resolve_full_user(client, reply):
         full_user = await client(GetFullUserRequest(user))
 
     return user, full_user
+
+
+async def _full_user_of(client, user):
+    """Как _resolve_full_user, но без reply-сообщения — для случаев, когда
+    сущность уже есть на руках (например, event.get_chat())."""
+    try:
+        return await client(GetFullUserRequest(user))
+    except Exception:
+        user = await client.get_entity(user.id)
+        return await client(GetFullUserRequest(user))
+
+
+async def _full_chat_of(client, entity):
+    """GetFullChannelRequest для каналов/супергрупп, GetFullChatRequest —
+    для старых базовых групп. Возвращает None, если ни то ни другое не
+    подошло (например, сущность — не чат вовсе)."""
+    try:
+        if isinstance(entity, Channel):
+            full = await client(GetFullChannelRequest(entity))
+            return full.full_chat
+        if isinstance(entity, Chat):
+            full = await client(GetFullChatRequest(entity.id))
+            return full.full_chat
+    except Exception:
+        pass
+    return None
+
+
+def _chat_type_label(entity):
+    if isinstance(entity, Channel):
+        return "канал" if getattr(entity, "broadcast", False) else "супергруппа"
+    if isinstance(entity, Chat):
+        return "группа"
+    return "чат"
+
+
+def _chat_title(title):
+    return (title or "").strip()
+
+
+def _user_rows(user, full_user):
+    rows = [f"id — `{user.id}`"]
+
+    usernames = _username_list(user)
+    if usernames:
+        rows.append(f"юзернейм — {usernames}")
+
+    rows.append(f"имя — `{user.first_name or 'нет'}`")
+    if getattr(user, "last_name", None):
+        rows.append(f"фамилия — `{user.last_name}`")
+
+    if getattr(user, "phone", None):
+        rows.append(f"телефон — `+{user.phone}`")
+    else:
+        rows.append("телефон — `скрыт/недоступен`")
+
+    rows.append(f"статус — {_fmt_status(getattr(user, 'status', None))}")
+
+    lang = getattr(user, "lang_code", None)
+    if lang:
+        rows.append(f"язык — `{lang}`")
+
+    flags = []
+    if getattr(user, "premium", False):
+        flags.append("premium")
+    if getattr(user, "verified", False):
+        flags.append("verified")
+    if getattr(user, "bot", False):
+        flags.append("бот")
+    if getattr(user, "scam", False):
+        flags.append("scam")
+    if getattr(user, "fake", False):
+        flags.append("fake")
+    if getattr(user, "restricted", False):
+        flags.append("restricted")
+    if getattr(user, "deleted", False):
+        flags.append("удалён")
+    if flags:
+        rows.append(f"метки — `{', '.join(flags)}`")
+
+    about = _full_attr(full_user, "about")
+    if about:
+        rows.append(f"о себе — `{about[:150]}`")
+
+    common = _full_attr(full_user, "common_chats_count")
+    if common:
+        rows.append(f"общих чатов — `{common}`")
+
+    if _full_attr(full_user, "blocked", False):
+        rows.append("в чёрном списке — `да`")
+
+    return rows
+
+
+def _chat_rows(entity, full_chat):
+    rows = [f"id — `{entity.id}`", f"тип — `{_chat_type_label(entity)}`"]
+
+    title = _chat_title(getattr(entity, "title", None))
+    if title:
+        rows.append(f"название — `{title}`")
+
+    username = username_of(entity)
+    if username:
+        rows.append(f"юзернейм — @{username}")
+
+    if full_chat is not None:
+        count = getattr(full_chat, "participants_count", None)
+        if count is not None:
+            rows.append(f"участников — `{count}`")
+
+        about = getattr(full_chat, "about", None)
+        if about:
+            rows.append(f"описание — `{about[:150]}`")
+
+        linked = getattr(full_chat, "linked_chat_id", None)
+        if linked:
+            rows.append(f"связанный чат — `{linked}`")
+
+    flags = []
+    if getattr(entity, "scam", False):
+        flags.append("scam")
+    if getattr(entity, "fake", False):
+        flags.append("fake")
+    if getattr(entity, "verified", False):
+        flags.append("verified")
+    if getattr(entity, "restricted", False):
+        flags.append("restricted")
+    if flags:
+        rows.append(f"метки — `{', '.join(flags)}`")
+
+    return rows
+
+
+async def _describe_entity(client, entity):
+    """Возвращает (title, rows) для .data по сущности любого типа."""
+    if isinstance(entity, User):
+        full_user = await _full_user_of(client, entity)
+        return "данные пользователя", _user_rows(entity, full_user)
+
+    full_chat = await _full_chat_of(client, entity)
+    is_channel_post = isinstance(entity, Channel) and getattr(entity, "broadcast", False)
+    title = "данные канала" if is_channel_post else "данные чата"
+    return title, _chat_rows(entity, full_chat)
 
 
 def _fmt_status(status):
@@ -90,64 +236,31 @@ def _username_list(user):
 
 @command(r'^\.data$', name="data")
 async def data_handler(event, client, state):
-    if not event.is_reply:
-        await safe_edit(event, get_usage_instructions("data"))
-        return
+    """Без ответа — инфо о текущем чате (или о собеседнике, если это лс).
+    Ответом на сообщение — инфо об авторе: пользователь или, если пост
+    отправлен от имени канала (например, в чате обсуждений под каналом,
+    или это анонимный пост канала), — инфо о самом канале."""
     try:
-        reply = await event.get_reply_message()
-        user, full_user = await _resolve_full_user(client, reply)
+        if event.is_reply:
+            reply = await event.get_reply_message()
+            sender = await reply.get_sender()
+            if sender is None:
+                input_sender = await reply.get_input_sender()
+                if input_sender is None:
+                    await safe_edit(event, fmt("ошибка", [
+                        "не удалось определить автора сообщения",
+                        "возможно, это анонимный админ без привязанной сущности",
+                    ]))
+                    return
+                sender = await client.get_entity(input_sender)
 
-        rows = [f"id — `{user.id}`"]
+            title, rows = await _describe_entity(client, sender)
+            await safe_edit(event, fmt(title, rows))
+            return
 
-        usernames = _username_list(user)
-        if usernames:
-            rows.append(f"юзернейм — {usernames}")
-
-        rows.append(f"имя — `{user.first_name or 'нет'}`")
-        if getattr(user, "last_name", None):
-            rows.append(f"фамилия — `{user.last_name}`")
-
-        if getattr(user, "phone", None):
-            rows.append(f"телефон — `+{user.phone}`")
-        else:
-            rows.append("телефон — `скрыт/недоступен`")
-
-        rows.append(f"статус — {_fmt_status(getattr(user, 'status', None))}")
-
-        lang = getattr(user, "lang_code", None)
-        if lang:
-            rows.append(f"язык — `{lang}`")
-
-        flags = []
-        if getattr(user, "premium", False):
-            flags.append("premium")
-        if getattr(user, "verified", False):
-            flags.append("verified")
-        if getattr(user, "bot", False):
-            flags.append("бот")
-        if getattr(user, "scam", False):
-            flags.append("scam")
-        if getattr(user, "fake", False):
-            flags.append("fake")
-        if getattr(user, "restricted", False):
-            flags.append("restricted")
-        if getattr(user, "deleted", False):
-            flags.append("удалён")
-        if flags:
-            rows.append(f"метки — `{', '.join(flags)}`")
-
-        about = _full_attr(full_user, "about")
-        if about:
-            rows.append(f"о себе — `{about[:150]}`")
-
-        common = _full_attr(full_user, "common_chats_count")
-        if common:
-            rows.append(f"общих чатов — `{common}`")
-
-        if _full_attr(full_user, "blocked", False):
-            rows.append("в чёрном списке — `да`")
-
-        await safe_edit(event, fmt("данные пользователя", rows))
+        chat = await event.get_chat()
+        title, rows = await _describe_entity(client, chat)
+        await safe_edit(event, fmt(title, rows))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"`{e}`"]))
 
