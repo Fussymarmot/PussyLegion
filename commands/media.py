@@ -117,6 +117,10 @@ def _set_archive_mode(mode: str) -> None:
 
 # ── управление списком чатов без архивации обычных сообщений ─────────────────
 
+# Служебные аккаунты Telegram (коды входа, уведомления) — их не архивируем.
+TELEGRAM_SERVICE_IDS = frozenset({777000, 42777})
+
+
 def _is_archive_skipped(chat_id: int) -> bool:
     """True, если для этого чата архив обычных сообщений отключён."""
     try:
@@ -336,7 +340,7 @@ async def archive_message(client, event):
             return
 
         chat_id = event.chat_id
-        if chat_id is None:
+        if chat_id is None or chat_id in TELEGRAM_SERVICE_IDS:
             return
 
         ttl = _ttl_value(event, msg)
