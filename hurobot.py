@@ -28,6 +28,7 @@ from logger import info, success, error, warning, exception, log
 from database import db, init_db
 
 from commands import get_backgrounds
+from core.archive import archive
 from core.dispatcher import attach as attach_dispatcher
 
 
@@ -228,6 +229,9 @@ class HuroBot:
         self.state.bot = self
         self.state.owner_id = self.me.id
 
+        # форум-группа архива создаётся до обработчиков: им уже нужны темы
+        await archive.start(self.client)
+
         attach_dispatcher(self.client, self.state)
 
         loaded = 1
@@ -405,6 +409,7 @@ class HuroBot:
                     await asyncio.sleep(30)
 
     async def stop(self):
+        await archive.stop()
         await self.state.stop_animation() if self.state else None
         if self.client and self.client.is_connected():
             try:

@@ -52,6 +52,23 @@ def init_db():
             )
         """)
 
+        # архив: id форум-группы, главной темы и темы каждого собеседника
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS archive_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS archive_topics (
+                user_id INTEGER PRIMARY KEY,
+                topic_id INTEGER NOT NULL,
+                title TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         # статистика не ведётся: таблица от старой реализации только
         # занимала место
         c.execute("DROP TABLE IF EXISTS stats")
@@ -64,5 +81,14 @@ def init_db():
         # таблицы старого мультиаккаунтного режима больше не используются
         c.execute("DROP TABLE IF EXISTS account_roles")
         c.execute("DROP TABLE IF EXISTS settings")
+
+        # чаты, где архивация обычных сообщений отключена вручную
+        # (исчезающие фото всё равно сохраняются)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS archive_skip (
+                chat_id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL
+            )
+        """)
 
     log.info("База данных инициализирована")

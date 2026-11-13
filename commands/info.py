@@ -3,6 +3,7 @@ import re
 from commands import command
 from commands.utils import safe_edit, fmt, get_moscow_time, get_usage_instructions
 from config import VERSION, CHANNEL
+from core.archive import archive
 from logger import LOG_BUFFER
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -36,8 +37,8 @@ async def logs_handler(event, client, state):
 
     clean = [ANSI_RE.sub("", line) for line in lines]
     body = "\n".join(clean)
-    if len(body) > 3500:
-        body = body[-3500:]
+    if len(body) > 3000:
+        body = body[-3000:]
 
     header = fmt("логи", [
         f"строк — `{len(clean)}`",
@@ -45,7 +46,12 @@ async def logs_handler(event, client, state):
     ])
 
     try:
-        await client.send_message("me", f"{header}\n\n```\n{body}\n```", parse_mode="md")
-        await safe_edit(event, fmt("логи отправлены", ["в избранное"]))
+        full = f"{header}\n\n```\n{body}\n```"
+        if archive.ready and archive.main_topic_id:
+            await archive.send_logs(full)
+            await safe_edit(event, fmt("логи отправлены", ["в General"]))
+        else:
+            await client.send_message("me", full, parse_mode="md")
+            await safe_edit(event, fmt("логи отправлены", ["в избранное"]))
     except Exception as e:
         await safe_edit(event, fmt("ошибка", [f"не удалось отправить логи — `{str(e)[:120]}`"]))

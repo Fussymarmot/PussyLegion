@@ -52,7 +52,7 @@ COMMAND_INFO = {
         "example": "`.help save`",
     },
     "save": {
-        "description": "Сохраняет самоудаляющееся фото из личного чата в избранное.",
+        "description": "Сохраняет самоудаляющееся фото из личного чата в тему этого человека в архиве.",
         "syntax": "`.save` (ответом на фото)",
         "example": "`.save`",
     },
@@ -67,7 +67,7 @@ COMMAND_INFO = {
         "example": "`.video https://youtu.be/dQw4w9WgXcQ`",
     },
     "logs": {
-        "description": "Присылает последние строки лога в избранное.",
+        "description": "Присылает последние строки лога в закреплённую тему General архивной группы.",
         "syntax": "`.logs` [число строк]",
         "example": "`.logs 30`",
     },
@@ -200,6 +200,16 @@ COMMAND_INFO = {
         "description": "Бросает кубик.",
         "syntax": "`.dice`",
         "example": "`.dice`",
+    },
+    "noarchive": {
+        "description": "Управляет архивацией обычных сообщений для текущего чата. `on` — отключить (исчезашки всегда сохраняются), `off` — включить обратно, `list` — список чатов без архивации. Результат отправляется в General архива.",
+        "syntax": "`.noarchive` [on/off/list]",
+        "example": "`.noarchive on`",
+    },
+    "archive": {
+        "description": "Глобальный переключатель архивации для всех чатов. `on` — полная архивация, `ttl` — только исчезающие фото, `off` — ничего не архивировать, `status` — текущий режим.",
+        "syntax": "`.archive` [on/ttl/off/status]",
+        "example": "`.archive ttl`",
     },
 }
 

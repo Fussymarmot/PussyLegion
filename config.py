@@ -11,6 +11,14 @@ except ImportError:
 VERSION = "v1.4.0"
 CHANNEL = os.getenv("CHANNEL", "@hurodev")
 
+# Форум-группа, куда бот складывает переписку и логи: создаётся сама
+# при первом запуске, если её ещё нет.
+ARCHIVE_TITLE = (os.getenv("ARCHIVE_TITLE") or "PussyLegion · архив").strip()
+ARCHIVE_ABOUT = (
+    os.getenv("ARCHIVE_ABOUT")
+    or "Автоматический архив: логи и переписка по темам."
+).strip()
+
 
 _env_api_id = (os.getenv("API_ID") or "").strip()
 _env_api_hash = (os.getenv("API_HASH") or "").strip()
