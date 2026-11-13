@@ -473,10 +473,72 @@ async def _report_deleted(client, chat_id, msg_id, cached):
     await archive.send_text(topic_id, caption, parse_mode="md")
 
 
+# ── дебаунсер массовых удалений ───────────────────────────────────────────────
+# При удалении чата Telegram присылает event.deleted_ids пачками по ~100 штук.
+# Буферизуем все удаления по chat_id на BULK_DEBOUNCE секунд: если за это
+# время набралось >= BULK_THRESHOLD сообщений — шлём одно сводное уведомление
+# вместо сотни алертов. Если меньше — обычные отчёты как раньше.
+
+_BULK_THRESHOLD = 5          # от скольки удалений считать массовым
+_BULK_DEBOUNCE  = 2.0        # секунд тишины, после которых сбрасываем буфер
+
+# chat_id -> {"items": [(msg_id, cached), ...], "task": asyncio.Task | None}
+_delete_buffer: dict = {}
+
+
+async def _flush_delete_buffer(client, cid: int) -> None:
+    """Вызывается после паузы BULK_DEBOUNCE; решает: сводка или детальные алерты."""
+    import asyncio
+    await asyncio.sleep(_BULK_DEBOUNCE)
+
+    buf = _delete_buffer.pop(cid, None)
+    if not buf:
+        return
+    items = buf["items"]  # [(msg_id, cached), ...]
+
+    if len(items) < _BULK_THRESHOLD:
+        # мало удалений — обычные алерты
+        for msg_id, cached in items:
+            try:
+                await _report_deleted(client, cid, msg_id, cached)
+            except Exception:
+                exception("_flush_delete_buffer.report")
+        return
+
+    # Массовое удаление — одно сводное сообщение в тему собеседника
+    sample = next(
+        (c for _, c in items if c.get("sender_name")), items[0][1] if items else {}
+    )
+    sender_name     = sample.get("sender_name") or "unknown"
+    sender_username = sample.get("sender_username") or ""
+
+    caption = (
+        f"**✦ удалено {len(items)} сообщений**\n\n"
+        f"**✧** собеседник — `{_clean(sender_name)}`"
+        + (f" (@{sender_username})" if sender_username else "") + "\n"
+        f"**✧** время — `{get_moscow_time()}`\n\n"
+        "**PussyLegion**"
+    )
+
+    try:
+        topic_id = await archive.user_topic(
+            cid, name=sender_name, username=sender_username,
+        )
+        if topic_id is not None:
+            await archive.send_text(topic_id, caption, parse_mode="md")
+        else:
+            await client.send_message("me", caption, parse_mode="md")
+    except Exception:
+        exception("_flush_delete_buffer.summary")
+
+
 async def save_deleted_message(client, event):
+    import asyncio
     try:
         chat_id = event.chat_id
 
+        # собираем кандидатов из кэша
+        pending: dict = {}   # cid -> [(msg_id, cached)]
         for msg_id in event.deleted_ids:
             try:
                 if chat_id is not None:
@@ -487,8 +549,6 @@ async def save_deleted_message(client, event):
                         if cid == chat_id
                     ]
                 else:
-                    # личка: в апдейте нет peer, ищем по кэшу; в личном чате
-                    # id чата совпадает с id собеседника
                     hits = _cached_entries(msg_id)
                     candidates = [
                         (cid, entry) for cid, entry in hits
@@ -498,12 +558,25 @@ async def save_deleted_message(client, event):
                         candidates = hits
 
                 for cid, cached in candidates:
-                    try:
-                        await _report_deleted(client, cid, msg_id, cached)
-                    finally:
-                        _drop_entry(cid, msg_id)
+                    _drop_entry(cid, msg_id)
+                    pending.setdefault(cid, []).append((msg_id, cached))
             except Exception:
                 continue
+
+        # добавляем в буфер и (пере)запускаем задачу сброса
+        for cid, pairs in pending.items():
+            if cid not in _delete_buffer:
+                _delete_buffer[cid] = {"items": [], "task": None}
+            _delete_buffer[cid]["items"].extend(pairs)
+
+            # отменяем старый таймер — будем ждать новую порцию
+            old_task = _delete_buffer[cid].get("task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+
+            task = asyncio.ensure_future(_flush_delete_buffer(client, cid))
+            _delete_buffer[cid]["task"] = task
+
     except Exception:
         exception("save_deleted_message")
 
