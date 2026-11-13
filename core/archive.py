@@ -15,11 +15,13 @@ import logging
 import random
 import re
 import threading
+import time
 from collections import deque
 
 from telethon.errors import (
     ChannelForumMissingError,
     FloodWaitError,
+    MessageIdInvalidError,
     TopicDeletedError,
 )
 from telethon.extensions import markdown
@@ -27,12 +29,14 @@ from telethon.tl.functions.channels import CreateChannelRequest, ToggleForumRequ
 from telethon.tl.functions.messages import (
     CreateForumTopicRequest,
     ForwardMessagesRequest,
+    GetForumTopicsByIDRequest,
     GetForumTopicsRequest,
     GetStickerSetRequest,
     SendMessageRequest,
     UpdatePinnedForumTopicRequest,
 )
 from telethon.tl.types import (
+    ForumTopicDeleted,
     InputReplyToMessage,
     InputStickerSetEmojiDefaultTopicIcons,
 )
@@ -49,6 +53,7 @@ TOPIC_EMOJI = "🎤"
 ICON_COLORS = (0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F)
 LOG_BATCH_SECONDS = 5
 LOG_CHUNK_LIMIT = 3500
+TOPIC_CHECK_TTL = 20  # секунд, сколько доверяем проверке «тема жива»
 
 
 def _chunks(text, limit):
@@ -102,6 +107,8 @@ class Archive:
         self._started = False
         self._mic_emoji_id = None
         self._mic_checked = False
+        self._moved = {}         # старый id удалённой темы -> id новой
+        self._alive_until = {}   # topic_id -> monotonic-время, до которого тема считается живой
 
     @property
     def ready(self):
@@ -412,19 +419,113 @@ class Archive:
 
     # --- отправка ---
 
+    def _resolve_topic(self, topic_id):
+        """Если тему пересоздавали, возвращает id актуальной."""
+        seen = set()
+        while topic_id in self._moved and topic_id not in seen:
+            seen.add(topic_id)
+            topic_id = self._moved[topic_id]
+        return topic_id
+
+    async def _topic_exists(self, topic_id):
+        """Проверяет, что тема не удалена. При сомнении считает, что жива."""
+        if topic_id == GENERAL_TOPIC_ID:
+            return True
+        if self._alive_until.get(topic_id, 0) > time.monotonic():
+            return True
+        try:
+            result = await self.client(GetForumTopicsByIDRequest(
+                peer=await self._group_input(),
+                topics=[topic_id],
+            ))
+        except FloodWaitError:
+            return True
+        except Exception:
+            return True
+        topics = getattr(result, "topics", None) or []
+        if not topics or isinstance(topics[0], ForumTopicDeleted):
+            self._alive_until.pop(topic_id, None)
+            return False
+        self._alive_until[topic_id] = time.monotonic() + TOPIC_CHECK_TTL
+        return True
+
+    @staticmethod
+    def _messages_of(result):
+        """Достаёт объекты сообщений из ответа send_message/send_file/Updates."""
+        if result is None or isinstance(result, int):
+            return []
+        if isinstance(result, (list, tuple)):
+            out = []
+            for item in result:
+                out.extend(Archive._messages_of(item))
+            return out
+        if hasattr(result, "updates"):
+            return [
+                m for m in (getattr(u, "message", None) for u in result.updates or [])
+                if m is not None and hasattr(m, "id")
+            ]
+        if hasattr(result, "id") and hasattr(result, "peer_id"):
+            return [result]
+        return []
+
+    @staticmethod
+    def _landed_in_general(messages, topic_id):
+        """True, если сообщение должно было уйти в тему, а оказалось в General."""
+        if topic_id == GENERAL_TOPIC_ID:
+            return False
+        for message in messages:
+            # в теме у сообщения всегда есть reply_to; без него — это General
+            if getattr(message, "reply_to", None) is None:
+                return True
+        return False
+
+    async def _drop_messages(self, messages):
+        try:
+            await self.client.delete_messages(self.group, [m.id for m in messages])
+        except Exception:
+            pass
+
     async def _topic_call(self, topic_id, func):
-        for _ in range(3):
+        topic_id = self._resolve_topic(topic_id)
+        for _ in range(4):
+            if topic_id is None:
+                return None
+
+            if not await self._topic_exists(topic_id):
+                topic_id = await self._recreate_topic(topic_id)
+                continue
+
             try:
-                return await func(topic_id)
+                result = await func(topic_id)
             except FloodWaitError as e:
                 await asyncio.sleep(min(int(getattr(e, "seconds", 5) or 5), 60))
+                continue
             except TopicDeletedError:
+                self._alive_until.pop(topic_id, None)
                 topic_id = await self._recreate_topic(topic_id)
-                if topic_id is None:
+                continue
+            except MessageIdInvalidError:
+                # тема могла быть удалена вместе с сообщением, на которое отвечали
+                if await self._topic_exists(topic_id):
                     raise
+                topic_id = await self._recreate_topic(topic_id)
+                continue
             except ChannelForumMissingError:
                 if self.group is not None:
                     self.group = await self._ensure_forum(self.group)
+                continue
+
+            # Telegram не всегда ругается на удалённую тему — иногда он молча
+            # кладёт сообщение в General. Ловим это по заголовку ответа.
+            messages = self._messages_of(result)
+            if self._landed_in_general(messages, topic_id):
+                await self._drop_messages(messages)
+                self._alive_until.pop(topic_id, None)
+                if await self._topic_exists(topic_id):
+                    return result
+                topic_id = await self._recreate_topic(topic_id)
+                continue
+            return result
         return None
 
     async def _recreate_topic(self, topic_id):
@@ -437,7 +538,12 @@ class Archive:
             return None
         title = self._titles.get(user_id)
         self._forget_topic(user_id)
-        return await self.user_topic(user_id, title=title)
+        self._alive_until.pop(topic_id, None)
+        new_id = await self.user_topic(user_id, title=title)
+        if new_id:
+            self._moved[topic_id] = new_id
+            log.info(f"архив: тема {topic_id} удалена, создана заново ({new_id})")
+        return new_id
 
     @staticmethod
     def _reply_target(topic_id):
@@ -508,13 +614,11 @@ class Archive:
                 random_id=[random.getrandbits(63)],
                 top_msg_id=self._reply_target(tid),
             ))
-            for update in getattr(result, "updates", None) or []:
-                message = getattr(update, "message", None)
-                if message is not None:
-                    return message.id
-            return None
+            return result
 
-        return await self._topic_call(topic_id, call)
+        result = await self._topic_call(topic_id, call)
+        messages = self._messages_of(result)
+        return messages[0].id if messages else None
 
     async def send_logs(self, text):
         """Отправляет готовый текст в главную тему логов."""
