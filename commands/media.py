@@ -362,6 +362,11 @@ async def archive_message(client, event):
             chat = await event.get_chat()
         except Exception:
             chat = None
+
+        # ботов не архивируем
+        if getattr(chat, "bot", False):
+            return
+
         name, username = _sender_meta(chat)
 
         topic_id = await _topic_for(chat_id, chat)
